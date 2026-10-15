@@ -3,14 +3,20 @@
 
 package org.glavo.ruyi.imager.gui;
 
+import io.github.palexdev.materialfx.controls.MFXButton;
 import io.github.palexdev.materialfx.controls.MFXComboBox;
+import io.github.palexdev.materialfx.controls.MFXProgressBar;
 import io.github.palexdev.materialfx.enums.FloatMode;
+import io.github.palexdev.materialfx.theming.JavaFXThemes;
+import io.github.palexdev.materialfx.theming.MaterialFXStylesheets;
+import io.github.palexdev.materialfx.theming.UserAgentBuilder;
 import javafx.animation.Animation;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyBooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 import javafx.concurrent.Task;
+import javafx.css.PseudoClass;
 import javafx.event.ActionEvent;
 import javafx.geometry.Orientation;
 import javafx.scene.Node;
@@ -22,6 +28,9 @@ import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
+import javafx.scene.paint.LinearGradient;
+import javafx.scene.shape.Rectangle;
 import javafx.stage.Stage;
 import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.AppServices;
@@ -93,12 +102,19 @@ public final class MainWindowJavaFxSmokeTest {
     /// Maximum time to wait for one JavaFX action.
     private static final long FX_TIMEOUT_SECONDS = 10L;
 
-    /// Starts the JavaFX toolkit for smoke tests.
+    /// Starts the JavaFX toolkit with the application's MaterialFX theme for smoke tests.
     @BeforeAll
     public static void startJavaFx() {
         Assumptions.assumeFalse(GraphicsEnvironment.isHeadless(), "JavaFX smoke tests require a graphics environment.");
         try {
             Platform.startup(() -> {
+                UserAgentBuilder.builder()
+                        .themes(JavaFXThemes.MODENA)
+                        .themes(MaterialFXStylesheets.forAssemble(true))
+                        .setDeploy(true)
+                        .setResolveAssets(true)
+                        .build()
+                        .setGlobal();
             });
         } catch (IllegalStateException _) {
         } catch (RuntimeException e) {
@@ -275,6 +291,50 @@ public final class MainWindowJavaFxSmokeTest {
                     selector.localToScene(selector.getBoundsInLocal()).getCenterY(),
                     editor.localToScene(editor.getBoundsInLocal()).getCenterY(),
                     0.5);
+            return null;
+        });
+    }
+
+    /// Verifies that the brand palette reaches MaterialFX controls without changing destructive action colors.
+    ///
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void appliesBrandColorsToControls() throws Exception {
+        runOnJavaFxThread(() -> {
+            MFXButton action = new MFXButton("Choose image");
+            action.getStyleClass().add("step-button");
+            MFXButton destructive = new MFXButton("Write image");
+            destructive.getStyleClass().add("primary-action-button");
+            MFXButton secondary = new MFXButton("Use local image");
+            secondary.getStyleClass().add("secondary-action-button");
+            MFXProgressBar progress = new MFXProgressBar(0.5);
+            MFXComboBox<String> selector = new MFXComboBox<>();
+            selector.setText("English");
+            VBox parent = new VBox(action, secondary, destructive, progress, selector);
+            parent.getStyleClass().add("app-root");
+            Scene scene = new Scene(parent, 400, 240);
+            @Nullable String stylesheet = applicationStylesheet();
+            assertNotNull(stylesheet);
+            scene.getStylesheets().add(stylesheet);
+            parent.applyCss();
+            parent.layout();
+
+            Color primary = Color.web("#0a2c7e");
+            LinearGradient background = assertInstanceOf(LinearGradient.class, parent.getBackground().getFills().getFirst().getFill());
+            assertEquals(Color.web("#d9e0f3"), background.getStops().getFirst().getColor());
+            assertEquals(Color.web("#f5f5f7"), background.getStops().getLast().getColor());
+            assertEquals(primary, action.getBackground().getFills().getFirst().getFill());
+            assertEquals(Color.WHITE, action.getTextFill());
+            assertEquals(Color.web("#f4eedb"), secondary.getBackground().getFills().getFirst().getFill());
+            assertEquals(primary, secondary.getTextFill());
+            assertEquals(Color.web("#d33f49"), destructive.getBackground().getFills().getFirst().getFill());
+            assertEquals(primary, assertInstanceOf(Rectangle.class, progress.lookup(".bar1")).getFill());
+
+            progress.setProgress(-1);
+            selector.pseudoClassStateChanged(PseudoClass.getPseudoClass("focus-within"), true);
+            parent.applyCss();
+            assertEquals(primary, assertInstanceOf(Rectangle.class, progress.lookup(".bar2")).getFill());
+            assertEquals(primary, selector.getBorder().getStrokes().getFirst().getTopStroke());
             return null;
         });
     }

@@ -3,6 +3,44 @@
     src: url("../fonts/AlibabaPuHuiTi-3-65-Medium.ttf");
 }
 
+/* Homepage colors from https://ruyisdk.org/, adapted to the desktop workflow. */
+.root {
+    -ruyi-primary: #0a2c7e;
+    -ruyi-title: #123d91;
+    -ruyi-secondary: #f4eedb;
+    -ruyi-secondary-hover: #f0e7cb;
+    -ruyi-primary-subtle: #f0f3f9;
+    -ruyi-primary-selected: #e2e8f4;
+    -ruyi-primary-border: #bdcbe5;
+    -ruyi-background: #f5f5f7;
+    -fx-accent: -ruyi-primary;
+    -fx-focus-color: -ruyi-primary;
+    -fx-faint-focus-color: rgba(10, 44, 126, 0.15);
+}
+
+.mfx-text-field,
+.mfx-combo-box-cell {
+    -mfx-main: -ruyi-primary;
+}
+
+.mfx-combo-box-cell {
+    -mfx-hover: -ruyi-primary-subtle;
+    -mfx-selected: -ruyi-primary-selected;
+}
+
+.mfx-combo-box .caret .mfx-ripple-generator {
+    -mfx-ripple-color: rgba(10, 44, 126, 0.1);
+}
+
+.mfx-progress-bar .track {
+    -fx-fill: -ruyi-primary-selected;
+}
+
+.mfx-progress-bar .bar1,
+.mfx-progress-bar .bar2 {
+    -fx-fill: -ruyi-primary;
+}
+
 /* MaterialFX declares Open Sans directly, so inherited root fonts do not reach these controls. */
 .root,
 .mfx-button,
@@ -17,19 +55,19 @@
 }
 
 .app-root {
-    -fx-background-color: #f6f8fb;
+    -fx-background-color: linear-gradient(to bottom, #d9e0f3, -ruyi-background);
 }
 
 .app-header {
-    -fx-background-color: #ffffff;
-    -fx-border-color: transparent transparent #dfe6ee transparent;
+    -fx-background-color: rgba(255, 255, 255, 0.85);
+    -fx-border-color: transparent transparent #e5e7eb transparent;
     -fx-padding: 26 32 20 32;
 }
 
 .app-title {
     -fx-font-size: 30px;
     -fx-font-weight: 700;
-    -fx-text-fill: #18212b;
+    -fx-text-fill: -ruyi-title;
 }
 
 .app-logo {
@@ -42,7 +80,7 @@
 
 .app-subtitle {
     -fx-font-size: 14px;
-    -fx-text-fill: #657282;
+    -fx-text-fill: #515154;
 }
 
 .workflow {
@@ -89,8 +127,8 @@
 }
 
 .independent-option-row {
-    -fx-background-color: #ffffff;
-    -fx-border-color: #bed7de;
+    -fx-background-color: rgba(255, 255, 255, 0.65);
+    -fx-border-color: #d9dde5;
     -fx-border-radius: 8;
     -fx-background-radius: 8;
     -fx-padding: 16 20;
@@ -102,8 +140,8 @@
 }
 
 .step-row {
-    -fx-background-color: #ffffff;
-    -fx-border-color: #dce6ef;
+    -fx-background-color: rgba(255, 255, 255, 0.85);
+    -fx-border-color: #e5e7eb;
     -fx-border-radius: 8;
     -fx-background-radius: 8;
     -fx-padding: 18 20;
@@ -113,7 +151,7 @@
     -fx-min-width: 34px;
     -fx-min-height: 34px;
     -fx-alignment: center;
-    -fx-background-color: #157a8c;
+    -fx-background-color: -ruyi-title;
     -fx-background-radius: 17px;
     -fx-text-fill: #ffffff;
     -fx-font-weight: 700;
@@ -133,12 +171,17 @@
 .step-button {
     -fx-min-width: 138px;
     -fx-padding: 9 14;
-    -fx-background-color: #eef7f9;
-    -fx-text-fill: #126879;
+    -fx-background-color: -ruyi-primary;
+    -fx-text-fill: #ffffff;
     -fx-font-weight: 700;
     -fx-background-radius: 8;
-    -fx-border-color: #bddde4;
+    -fx-border-color: -ruyi-primary;
     -fx-border-radius: 8;
+}
+
+.step-button:hover {
+    -fx-background-color: #0f3fae;
+    -fx-border-color: #0f3fae;
 }
 
 .step-button,
@@ -181,8 +224,8 @@
 }
 
 .active-flash-summary {
-    -fx-background-color: #edf3f6;
-    -fx-border-color: #cfdae4;
+    -fx-background-color: -ruyi-primary-subtle;
+    -fx-border-color: #d9dde5;
     -fx-border-radius: 8;
     -fx-background-radius: 8;
     -fx-padding: 12 14;
@@ -217,7 +260,7 @@
 
 .phase-progress-box {
     -fx-background-color: #ffffff;
-    -fx-border-color: #dce6ef;
+    -fx-border-color: #e5e7eb;
     -fx-border-radius: 8;
     -fx-background-radius: 8;
     -fx-padding: 16 18;
@@ -248,7 +291,7 @@
     -fx-alignment: center-right;
     -fx-font-size: 12px;
     -fx-font-weight: 700;
-    -fx-text-fill: #126879;
+    -fx-text-fill: -ruyi-primary;
 }
 
 .phase-progress-bar {
@@ -268,28 +311,28 @@
 .secondary-action-button {
     -fx-min-width: 150px;
     -fx-padding: 9 14;
-    -fx-background-color: #ffffff;
-    -fx-text-fill: #126879;
+    -fx-background-color: -ruyi-secondary;
+    -fx-text-fill: -ruyi-primary;
     -fx-font-weight: 700;
     -fx-background-radius: 8;
-    -fx-border-color: #bddde4;
+    -fx-border-color: transparent;
     -fx-border-radius: 8;
 }
 
 .header-button {
     -fx-padding: 8 12;
-    -fx-background-color: #f2f5f8;
+    -fx-background-color: -ruyi-background;
     -fx-text-fill: #394756;
     -fx-font-weight: 700;
     -fx-background-radius: 8;
-    -fx-border-color: #d6e0ea;
+    -fx-border-color: #d9dde5;
     -fx-border-radius: 8;
 }
 
 .settings-language-selector {
     -fx-background-color: #ffffff;
     -fx-text-fill: #394756;
-    -fx-border-color: #d6e0ea;
+    -fx-border-color: #d9dde5;
     -fx-border-radius: 8;
     -fx-background-radius: 8;
     -fx-min-width: 220px;
@@ -298,7 +341,7 @@
 .selection-list-view {
     -fx-background-color: #ffffff;
     -fx-background-radius: 8;
-    -fx-border-color: #dce6ef;
+    -fx-border-color: #e5e7eb;
     -fx-border-radius: 8;
     -fx-padding: 4;
     -fx-effect: null;
@@ -311,7 +354,7 @@
 .selection-tree-view {
     -fx-background-color: #ffffff;
     -fx-background-radius: 8;
-    -fx-border-color: #dce6ef;
+    -fx-border-color: #e5e7eb;
     -fx-border-radius: 8;
     -fx-padding: 4;
     -fx-effect: null;
@@ -417,7 +460,7 @@
 .selection-search {
     -fx-background-color: #ffffff;
     -fx-background-insets: 0;
-    -fx-border-color: #d6e0ea;
+    -fx-border-color: #d9dde5;
     -fx-border-width: 1;
     -fx-border-radius: 8;
     -fx-background-radius: 8;
@@ -426,7 +469,7 @@
 }
 
 .selection-search:focused {
-    -fx-border-color: #8fb7c5;
+    -fx-border-color: -ruyi-primary;
 }
 
 .selection-list-view .list-cell {
@@ -448,13 +491,13 @@
 }
 
 .selection-list-view .list-cell:selected {
-    -fx-background-color: #e3f3f6;
-    -fx-text-fill: #126879;
+    -fx-background-color: -ruyi-primary-selected;
+    -fx-text-fill: -ruyi-primary;
 }
 
 .selection-tree-view .tree-cell:selected {
-    -fx-background-color: #e3f3f6;
-    -fx-text-fill: #126879;
+    -fx-background-color: -ruyi-primary-selected;
+    -fx-text-fill: -ruyi-primary;
 }
 
 .selection-tree-view .tree-cell.os-category-tree-cell {
@@ -468,7 +511,7 @@
 }
 
 .selection-tree-view .tree-cell:selected > .tree-disclosure-node > .arrow {
-    -fx-background-color: #126879;
+    -fx-background-color: -ruyi-primary;
 }
 
 .selection-list-view .list-cell.unsupported-image-cell,
@@ -491,8 +534,8 @@
 
 .selection-tree-view .tree-cell.flashable-image-cell:selected,
 .selection-tree-view .tree-cell.os-category-tree-cell:selected {
-    -fx-background-color: #e3f3f6;
-    -fx-text-fill: #126879;
+    -fx-background-color: -ruyi-primary-selected;
+    -fx-text-fill: -ruyi-primary;
 }
 
 .selection-cell-content {
@@ -625,12 +668,17 @@
 .settings-action-button {
     -fx-min-width: 150px;
     -fx-padding: 8 14;
-    -fx-background-color: #ffffff;
-    -fx-text-fill: #126879;
+    -fx-background-color: -ruyi-secondary;
+    -fx-text-fill: -ruyi-primary;
     -fx-font-weight: 700;
     -fx-background-radius: 8;
-    -fx-border-color: #bddde4;
+    -fx-border-color: transparent;
     -fx-border-radius: 8;
+}
+
+.secondary-action-button:hover,
+.settings-action-button:hover {
+    -fx-background-color: -ruyi-secondary-hover;
 }
 
 .settings-update-status {
@@ -674,9 +722,9 @@
 }
 
 .confirmation-summary {
-    -fx-background-color: #f6f8fb;
+    -fx-background-color: -ruyi-background;
     -fx-background-radius: 8;
-    -fx-border-color: #dce6ef;
+    -fx-border-color: #e5e7eb;
     -fx-border-radius: 8;
     -fx-padding: 12 14;
 }
@@ -707,7 +755,7 @@
 }
 
 .dialog-primary-button {
-    -fx-background-color: #157a8c;
+    -fx-background-color: -ruyi-primary;
     -fx-text-fill: #ffffff;
 }
 
@@ -723,5 +771,5 @@
 .dialog-secondary-button {
     -fx-background-color: #ffffff;
     -fx-text-fill: #394756;
-    -fx-border-color: #d6e0ea;
+    -fx-border-color: #d9dde5;
 }
