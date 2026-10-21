@@ -25,7 +25,7 @@ import java.util.Properties
 
 plugins {
     application
-    id("de.undercouch.download") version "5.7.0"
+    alias(libs.plugins.download)
 }
 
 data class FastbootBundle(
@@ -55,7 +55,7 @@ enum class JlinkJdkArchiveType {
     TAR_GZ,
 }
 
-val fastbootPlatformToolsVersion = "37.0.0"
+val fastbootPlatformToolsVersion = libs.versions.platform.tools.get()
 val fastbootBundles = listOf(
     FastbootBundle(
         taskSuffix = "WindowsX8664",
@@ -111,11 +111,11 @@ val javafxModules = listOf("base", "controls", "graphics")
 val javafxModuleNames = javafxModules.map { "javafx.$it" }
 val javafxRuntimeAvailable = javafxRuntimePlatform() != null
 val applicationJvmArgs = listOf("--enable-native-access=ALL-UNNAMED,javafx.graphics")
-val jlinkJdkVersion = providers.gradleProperty("jlink.jdk.version").orElse("25.0.4.1+1").get()
+val jlinkJdkVersion = providers.gradleProperty("jlink.jdk.version").orElse(libs.versions.liberica).get()
 val jlinkJdkPlatform = providers.gradleProperty("jlink.jdk.platform")
     .orElse(currentJlinkPlatform() ?: error("Unsupported platform for jlink JDK bundle"))
     .get()
-val linuxRiscv64JavafxVersion = "25.0.4"
+val linuxRiscv64JavafxVersion = libs.versions.riscv64.javafx.get()
 val linuxRiscv64JavafxArchiveFileName = "openjfx-$linuxRiscv64JavafxVersion-linux-riscv64-jmods.zip"
 val linuxRiscv64JavafxArchiveDirectory = "javafx-jmods-$linuxRiscv64JavafxVersion-linux-riscv64"
 val linuxRiscv64JavafxUrl =
@@ -231,7 +231,7 @@ val linuxRiscv64JavafxArchive =
 val linuxRiscv64JavafxJmodsDirectory = layout.buildDirectory.dir("jmods/javafx/linux-riscv64")
 val targetJlinkExecutable = jlinkJdkDirectory.map { it.file("bin/${jlinkJdkBundle.executableName}") }
 val java25Launcher = javaToolchains.launcherFor {
-    languageVersion = JavaLanguageVersion.of(25)
+    languageVersion = JavaLanguageVersion.of(libs.versions.java.get())
 }
 val hostJlinkExecutable = java25Launcher.map {
     val executable = if (isWindowsOs(System.getProperty("os.name").lowercase())) "jlink.exe" else "jlink"
@@ -433,13 +433,13 @@ val extractJlinkJavafxJmods = if (jlinkJdkPlatform == "linux-riscv64") {
 dependencies {
     implementation(project(":sdk"))
 
-    compileOnly("org.jetbrains:annotations:26.1.0")
-    testCompileOnly("org.jetbrains:annotations:26.1.0")
+    compileOnly(libs.annotations)
+    testCompileOnly(libs.annotations)
 
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.21.2")
-    implementation("info.picocli:picocli:4.7.7")
-    implementation("io.github.palexdev:materialfx:21.18.0-alpha")
-    runtimeOnly("org.slf4j:slf4j-jdk14:2.0.17")
+    implementation(libs.jackson.databind)
+    implementation(libs.picocli)
+    implementation(libs.materialfx)
+    runtimeOnly(libs.slf4j.jdk14)
 
     javafxModules.forEach { module ->
         val runtimeDependency = javafxRuntime(module)
@@ -453,10 +453,10 @@ dependencies {
         }
     }
 
-    testImplementation(platform("org.junit:junit-bom:6.0.0"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-    testRuntimeOnly("org.slf4j:slf4j-jdk14:2.0.17")
+    testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
+    testRuntimeOnly(libs.slf4j.jdk14)
 }
 
 sourceSets {
@@ -824,14 +824,14 @@ tasks.register("jlinkZip") {
 /// @param module JavaFX module name.
 /// @return dependency notation, or null when no matching runtime is available from Maven Central.
 fun javafxRuntime(module: String): String? =
-    javafxRuntimePlatform()?.let { "org.openjfx:javafx-$module:25.0.2:$it" }
+    javafxRuntimePlatform()?.let { "org.openjfx:javafx-$module:${libs.versions.javafx.get()}:$it" }
 
 /// Returns the JavaFX compile-only dependency notation for the current build platform.
 ///
 /// @param module JavaFX module name.
 /// @return dependency notation, or null when no compile fallback is available.
 fun javafxCompileOnly(module: String): String? =
-    javafxCompilePlatform()?.let { "org.openjfx:javafx-$module:25.0.2:$it" }
+    javafxCompilePlatform()?.let { "org.openjfx:javafx-$module:${libs.versions.javafx.get()}:$it" }
 
 /// Returns the JavaFX runtime classifier for the current build platform.
 ///
@@ -907,7 +907,7 @@ fun currentJlinkPlatform(): String? {
 /// @param version Liberica JDK version string.
 /// @return Liberica JDK bundle descriptor.
 fun libericaJdkBundle(platform: String, version: String): JlinkJdkBundle {
-    require(version == "25.0.4.1+1") {
+    require(version == libs.versions.liberica.get()) {
         "No bundled integrity metadata is available for Liberica JDK $version; " +
             "configure jlink.jdk.url, jlink.jdk.sha256, and jlink.jdk.sizeBytes"
     }

@@ -8,11 +8,11 @@ repositories {
 
 dependencies {
     compileOnly(gradleApi())
-    compileOnly("org.jetbrains:annotations:26.1.0")
+    compileOnly(libs.annotations)
 }
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
+        languageVersion = JavaLanguageVersion.of(libs.versions.java.get())
     }
 }

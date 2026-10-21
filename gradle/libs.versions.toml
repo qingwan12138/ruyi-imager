@@ -1,0 +1,41 @@
+[versions]
+java = "25"
+annotations = "26.1.0"
+jackson = "2.21.2"
+javafx = "25.0.2"
+jgit = "7.6.0.202603022253-r"
+junit = "6.0.0"
+kala-compress = "1.27.1-3"
+materialfx = "21.18.0-alpha"
+picocli = "4.7.7"
+slf4j = "2.0.17"
+tomlj = "1.1.1"
+download-plugin = "5.7.0"
+wrapper-neo = "0.2.0"
+
+# Bundled archives also require matching checksums and sizes in app/build.gradle.kts.
+liberica = "25.0.4.1+1"
+riscv64-javafx = "25.0.4"
+platform-tools = "37.0.0"
+
+[libraries]
+annotations = { module = "org.jetbrains:annotations", version.ref = "annotations" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+kala-compress-tar = { module = "org.glavo.kala:kala-compress-archivers-tar", version.ref = "kala-compress" }
+kala-compress-bzip2 = { module = "org.glavo.kala:kala-compress-compressors-bzip2", version.ref = "kala-compress" }
+kala-compress-lz4 = { module = "org.glavo.kala:kala-compress-compressors-lz4", version.ref = "kala-compress" }
+kala-compress-xz = { module = "org.glavo.kala:kala-compress-compressors-xz", version.ref = "kala-compress" }
+kala-compress-zstandard = { module = "org.glavo.kala:kala-compress-compressors-zstandard", version.ref = "kala-compress" }
+materialfx = { module = "io.github.palexdev:materialfx", version.ref = "materialfx" }
+picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+slf4j-jdk14 = { module = "org.slf4j:slf4j-jdk14", version.ref = "slf4j" }
+tomlj = { module = "org.tomlj:tomlj", version.ref = "tomlj" }
+
+[plugins]
+download = { id = "de.undercouch.download", version.ref = "download-plugin" }
+wrapper-neo = { id = "org.glavo.gradle-wrapper-neo", version.ref = "wrapper-neo" }

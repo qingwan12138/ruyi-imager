@@ -3,7 +3,7 @@ import java.util.Properties
 
 plugins {
     base
-    id("org.glavo.gradle-wrapper-neo") version "0.2.0"
+    alias(libs.plugins.wrapper.neo)
 }
 
 group = "org.glavo"
@@ -68,7 +68,7 @@ subprojects {
     plugins.withType<JavaPlugin> {
         extensions.configure<JavaPluginExtension> {
             toolchain {
-                languageVersion = JavaLanguageVersion.of(25)
+                languageVersion = JavaLanguageVersion.of(libs.versions.java.get())
             }
         }
 
