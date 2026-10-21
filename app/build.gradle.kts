@@ -62,8 +62,8 @@ val fastbootBundles = listOf(
         platformDirectory = "windows-x86_64",
         archiveFileName = "platform-tools_r$fastbootPlatformToolsVersion-win.zip",
         url = "https://dl.google.com/android/repository/platform-tools_r$fastbootPlatformToolsVersion-win.zip",
-        sha256 = "4fe305812db074cea32903a489d061eb4454cbc90a49e8fea677f4b7af764918",
-        sizeBytes = 8_092_164L,
+        sha256 = "45f4d63113e895ebde0c90f194099a4676b6ac653bd28d54314a9e022bbc1a99",
+        sizeBytes = 8_044_989L,
         archiveEntries = listOf(
             "platform-tools/fastboot.exe",
             "platform-tools/AdbWinApi.dll",
@@ -76,8 +76,8 @@ val fastbootBundles = listOf(
         platformDirectory = "macos-x86_64",
         archiveFileName = "platform-tools_r$fastbootPlatformToolsVersion-darwin.zip",
         url = "https://dl.google.com/android/repository/platform-tools_r$fastbootPlatformToolsVersion-darwin.zip",
-        sha256 = "094a1395683c509fd4d48667da0d8b5ef4d42b2abfcd29f2e8149e2f989357c7",
-        sizeBytes = 16_442_240L,
+        sha256 = "ee39ad5967e95c2a07f04dbcbde96b1a0c916ba376096db5d2f498b7727a5d1d",
+        sizeBytes = 16_110_554L,
         archiveEntries = listOf("platform-tools/fastboot"),
         executableName = "fastboot",
         targetPlatformDirectories = listOf("macos-x86_64", "macos-aarch64"),
@@ -87,8 +87,8 @@ val fastbootBundles = listOf(
         platformDirectory = "linux-x86_64",
         archiveFileName = "platform-tools_r$fastbootPlatformToolsVersion-linux.zip",
         url = "https://dl.google.com/android/repository/platform-tools_r$fastbootPlatformToolsVersion-linux.zip",
-        sha256 = "198ae156ab285fa555987219af237b31102fefe8b9d2bc274708a8d4f2865a07",
-        sizeBytes = 9_167_924L,
+        sha256 = "d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1",
+        sizeBytes = 9_054_187L,
         archiveEntries = listOf("platform-tools/fastboot"),
         executableName = "fastboot",
     ),
@@ -860,7 +860,7 @@ fun javafxCompilePlatform(): String? {
 
     val osName = System.getProperty("os.name").lowercase()
     val arch = normalizedArch(System.getProperty("os.arch"))
-    // OpenJFX 25.0.2 does not publish a Linux RISC-V runtime classifier, but the Linux API jar can compile the app.
+    // OpenJFX 25 does not publish a Linux RISC-V runtime classifier, but the Linux API jar can compile the app.
     return if (osName.contains("linux") && arch == "riscv64") "linux" else null
 }
 
@@ -928,19 +928,19 @@ fun libericaJdkBundle(platform: String, version: String): JlinkJdkBundle {
     val executableName = if (platform.startsWith("windows-")) "jlink.exe" else "jlink"
     val (sha256, sizeBytes) = when (platform) {
         "windows-x86_64" ->
-            "656ccc6c963925070df048c2d185fcce2903d3c5700c768d178ace72bee4d223" to 347_044_876L
+            "a1ba9ee63b347f612bb964ac1be28a274788b0a8e1a3aca82f4d69614af6e9c5" to 347_963_841L
         "windows-aarch64" ->
-            "dc490a4a53f0d9b2ccc96d70a74456e32adec064a868a793a10fd7179f5369c7" to 232_764_551L
+            "6acc29b889eeea0ffcc4a3c6d9c07b50f3d85aaa16e49e1a5c55dedea2e2160f" to 230_726_054L
         "macos-x86_64" ->
-            "f9db61e635175bad9f3475d18f299d34d09f7fcc4c1a5d366da62e2dc5a68b4a" to 362_646_948L
+            "55c0985b92d9142c64569756365c657dd58a4db98ed6d98a290fe539a5243038" to 354_580_655L
         "macos-aarch64" ->
-            "18c273997a63db044401571bfeace4b3c57abaa76f12979f27f2af564a9682c0" to 356_764_964L
+            "6651515a2f0c19f2018f47ec98dd5305288e4b1a6f24ba8dd2753b314eeb35d0" to 348_507_414L
         "linux-x86_64" ->
-            "74de69863cfa8d58dd49992a97249ad041169ad01daa14a545ef9c7ef173cbd0" to 407_472_475L
+            "aac10c6aff7bc47453c1cafeec9fb0c0153dac572afa910a5d2d751f3b32afd0" to 377_293_270L
         "linux-aarch64" ->
-            "47e93cea18997caea7a8f220bd147c4c2c41ee2862c434e4a9a6d8e75240eab8" to 401_947_012L
+            "b1872d62d5abe58c22296bcd659f061266c8e087fb3c14ea44a52a3916f4798f" to 371_803_716L
         "linux-riscv64" ->
-            "4497fc7f30d1afefd23436fd6d0572bbe505f3ffcec6571a502f46bc866692f4" to 205_051_812L
+            "6993a12090e7bf1f2669269c058be9c8d51987e1a7de1507d5ebb5f0e0c70093" to 205_036_324L
         else -> error("Unsupported jlink target platform: $platform")
     }
     return JlinkJdkBundle(
