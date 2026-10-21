@@ -6,10 +6,6 @@ dependencies {
     compileOnlyApi(libs.annotations)
     testCompileOnly(libs.annotations)
 
-    // TOMLJ exposes Checker Framework annotations but declares them as runtime dependencies.
-    compileOnly(libs.checker.qual)
-    testCompileOnly(libs.checker.qual)
-
     api(libs.slf4j.api)
 
     implementation(libs.jackson.databind)

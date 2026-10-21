@@ -18,6 +18,7 @@ import org.jetbrains.annotations.Unmodifiable;
 import org.tomlj.Toml;
 import org.tomlj.TomlArray;
 import org.tomlj.TomlParseError;
+import org.tomlj.TomlParseOptions;
 import org.tomlj.TomlParseResult;
 import org.tomlj.TomlTable;
 
@@ -845,7 +846,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
 
         TomlParseResult messages;
         try {
-            messages = Toml.parse(path);
+            messages = Toml.parse(path, TomlParseOptions.sourceless());
         } catch (IOException e) {
             return Map.of();
         }
@@ -1202,7 +1203,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     /// @return TOML parse result.
     /// @throws IOException when the file cannot be read or parsed.
     private static TomlParseResult parseToml(Path path) throws IOException {
-        TomlParseResult result = Toml.parse(path);
+        TomlParseResult result = Toml.parse(path, TomlParseOptions.sourceless());
         if (result.hasErrors()) {
             LOGGER.atWarn().log(() -> "TOML parse failed. path=" + path + ", errors=" + result.errors().size());
             StringBuilder builder = new StringBuilder(SdkMessages.get("core.toml.parseFailed", path));

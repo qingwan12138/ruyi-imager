@@ -1,7 +1,6 @@
 [versions]
 java = "25"
 annotations = "26.1.0"
-checker-qual = "3.55.1"
 jackson = "2.21.8"
 javafx = "25.0.5"
 jgit = "7.8.0.202609011348-r"
@@ -10,7 +9,7 @@ kala-compress = "1.27.1-5"
 materialfx = "21.18.0-alpha"
 picocli = "4.7.7"
 slf4j = "2.0.20"
-tomlj = "1.3.1"
+tomlj = "2.2.0"
 download-plugin = "5.7.0"
 wrapper-neo = "0.2.0"
 
@@ -21,7 +20,6 @@ platform-tools = "37.0.1"
 
 [libraries]
 annotations = { module = "org.jetbrains:annotations", version.ref = "annotations" }
-checker-qual = { module = "org.checkerframework:checker-qual", version.ref = "checker-qual" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }

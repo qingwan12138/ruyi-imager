@@ -26,6 +26,7 @@ import org.jetbrains.annotations.Unmodifiable;
 import org.tomlj.Toml;
 import org.tomlj.TomlArray;
 import org.tomlj.TomlParseError;
+import org.tomlj.TomlParseOptions;
 import org.tomlj.TomlParseResult;
 import org.tomlj.TomlTable;
 
@@ -703,7 +704,7 @@ public final class RuyiRepositoryStore {
     /// @return TOML parse result.
     /// @throws IOException when the file cannot be read or parsed.
     private static TomlParseResult parseToml(Path path) throws IOException {
-        TomlParseResult result = Toml.parse(path);
+        TomlParseResult result = Toml.parse(path, TomlParseOptions.sourceless());
         if (result.hasErrors()) {
             StringBuilder builder = new StringBuilder(SdkMessages.get("core.toml.parseFailed", path));
             for (TomlParseError error : result.errors()) {
