@@ -6,6 +6,7 @@ package org.glavo.ruyi.imager.gui;
 import io.github.palexdev.materialfx.controls.MFXButton;
 import io.github.palexdev.materialfx.controls.MFXComboBox;
 import io.github.palexdev.materialfx.controls.MFXProgressBar;
+import io.github.palexdev.materialfx.dialogs.MFXGenericDialogBuilder;
 import io.github.palexdev.materialfx.enums.FloatMode;
 import io.github.palexdev.materialfx.theming.JavaFXThemes;
 import io.github.palexdev.materialfx.theming.MaterialFXStylesheets;
@@ -778,7 +779,7 @@ public final class MainWindowJavaFxSmokeTest {
             Scene scene = new Scene(surface, 560, 1000);
             scene.getStylesheets().add(applicationStylesheet());
             Node button = applicationUpdate ? settings.applicationUpdateButton() : settings.metadataUpdateButton();
-            Parent section = button.getParent();
+            Parent section = button.getParent().getParent();
             surface.applyCss();
             surface.layout();
             double footerY = footer.localToScene(footer.getLayoutBounds()).getMinY();
@@ -794,10 +795,14 @@ public final class MainWindowJavaFxSmokeTest {
             Label status = assertInstanceOf(Label.class, section.lookup(".settings-update-status"));
             assertTrue(progress.isVisible());
             assertTrue(progress.isManaged());
-            assertEquals(180, progress.getWidth(), 0.5);
+            assertEquals(100, progress.getWidth(), 0.5);
             assertEquals(-1, progress.getProgress());
             assertAbove(button, status);
-            assertAbove(status, progress);
+            assertAbove(progress, status);
+            assertEquals(button.localToScene(button.getLayoutBounds()).getCenterY(),
+                    progress.localToScene(progress.getLayoutBounds()).getCenterY(), 0.5);
+            assertTrue(button.localToScene(button.getLayoutBounds()).getMaxX()
+                    < progress.localToScene(progress.getLayoutBounds()).getMinX());
 
             String failure = "Failed to update https://example.invalid/" + "long-repository-name/".repeat(30);
             if (applicationUpdate) {
@@ -832,6 +837,69 @@ public final class MainWindowJavaFxSmokeTest {
             surface.layout();
             assertEquals(footerY, footer.localToScene(footer.getLayoutBounds()).getMinY(), 0.5);
             root.disableProperty().unbind();
+            return null;
+        });
+    }
+
+    /// Checks the settings form inside its actual dialog shell in both supported languages.
+    ///
+    /// @param languageTag GUI language tag.
+    /// @param directory isolated update source directory.
+    /// @throws Exception when JavaFX execution fails.
+    @ParameterizedTest
+    @ValueSource(strings = {"en", "zh-CN"})
+    public void alignsCompactSettingsDialog(String languageTag, @TempDir Path directory) throws Exception {
+        runOnJavaFxThread(() -> {
+            Locale original = Messages.locale();
+            Messages.setLocale(Locale.forLanguageTag(languageTag));
+            SettingsDialog settings = new SettingsDialog(Messages.locale(), new BuildInfo("1.0.0", false),
+                    UpdateSource.of(directory.resolve("update.json")), true, UpdateChannel.STABLE,
+                    new SimpleBooleanProperty());
+            try {
+                MFXButton cancel = new MFXButton(Messages.get("gui.dialog.cancel"));
+                cancel.getStyleClass().addAll("dialog-button", "dialog-secondary-button");
+                MFXButton save = new MFXButton(Messages.get("gui.settings.save"));
+                save.getStyleClass().addAll("dialog-button", "dialog-primary-button");
+                var dialog = MFXGenericDialogBuilder.build()
+                        .setHeaderText(Messages.get("gui.settings.title"))
+                        .setContent(settings.root())
+                        .setShowClose(false).setShowMinimize(false).setShowAlwaysOnTop(false)
+                        .addStyleClasses("material-dialog", "material-settings-dialog")
+                        .addActions(cancel, save).get();
+                Scene scene = new Scene(dialog);
+                scene.getStylesheets().add(applicationStylesheet());
+                dialog.applyCss();
+                dialog.autosize();
+                dialog.layout();
+                Node language = dialog.lookup(".settings-language-selector");
+                Node version = dialog.lookup(".settings-value");
+                Node update = settings.metadataUpdateButton();
+                double controlX = language.localToScene(language.getLayoutBounds()).getMinX();
+                assertEquals(controlX, version.localToScene(version.getLayoutBounds()).getMinX(), 0.5);
+                assertEquals(controlX, update.localToScene(update.getLayoutBounds()).getMinX(), 0.5);
+                Node header = dialog.lookup(".header-label");
+                assertTrue(language.localToScene(language.getLayoutBounds()).getMinY()
+                        - header.localToScene(header.getLayoutBounds()).getMaxY() >= 12);
+                assertTrue(dialog.getWidth() <= 500);
+                assertTrue(dialog.getHeight() < 320);
+                double initialHeight = dialog.getHeight();
+                double initialWidth = dialog.getWidth();
+                settings.metadataUpdateStarted();
+                dialog.autosize();
+                dialog.layout();
+                assertEquals(initialHeight, dialog.getHeight(), 0.5);
+                settings.metadataUpdateFinished(false,
+                        "Repository update failed: https://example.invalid/" + "long-repository-path/".repeat(12));
+                dialog.autosize();
+                dialog.layout();
+                Node error = dialog.lookup(".settings-update-error");
+                assertAbove(error, save);
+                assertAbove(error, cancel);
+                assertEquals(initialWidth, dialog.getWidth(), 0.5);
+            } finally {
+                settings.root().disableProperty().unbind();
+                Messages.setLocale(original);
+            }
             return null;
         });
     }

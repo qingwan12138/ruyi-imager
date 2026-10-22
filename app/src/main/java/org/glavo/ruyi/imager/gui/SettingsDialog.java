@@ -9,7 +9,9 @@ import io.github.palexdev.materialfx.controls.MFXProgressBar;
 import javafx.application.Platform;
 import javafx.beans.value.ObservableBooleanValue;
 import javafx.collections.FXCollections;
+import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.geometry.VPos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -17,6 +19,9 @@ import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.ColumnConstraints;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
@@ -104,52 +109,43 @@ final class SettingsDialog {
         this.metadataUpdateButton.getStyleClass().add("settings-action-button");
         this.metadataUpdateStatus = createStatusLabel();
 
-        Label generalTitle = new Label(Messages.get("gui.settings.general"));
-        generalTitle.getStyleClass().add("settings-section-title");
-        GridPane generalGrid = new GridPane();
-        generalGrid.setAlignment(Pos.CENTER_LEFT);
-        generalGrid.getStyleClass().add("settings-grid");
+        GridPane generalGrid = createSettingsGrid();
         generalGrid.add(settingsLabel("gui.language"), 0, 0);
         generalGrid.add(languageSelector, 1, 0);
         generalGrid.add(settingsLabel("gui.settings.version"), 0, 1);
         Label versionValue = new Label(buildInfo.version());
         versionValue.getStyleClass().add("settings-value");
+        versionValue.setMinWidth(0);
+        versionValue.setWrapText(true);
         generalGrid.add(versionValue, 1, 1);
-        VBox generalSection = new VBox(generalTitle, generalGrid);
-        generalSection.getStyleClass().add("settings-section");
+        Label metadataLabel = settingsLabel("gui.settings.metadata");
+        GridPane.setValignment(metadataLabel, VPos.TOP);
+        GridPane.setMargin(metadataLabel, new Insets(8, 0, 0, 0));
+        generalGrid.add(metadataLabel, 0, 2);
+        generalGrid.add(createOperationContent(metadataUpdateButton, metadataUpdateProgress,
+                metadataUpdateStatus, metadataUpdateError), 1, 2);
 
         Label applicationUpdateTitle = new Label(Messages.get("gui.settings.applicationUpdates"));
         applicationUpdateTitle.getStyleClass().add("settings-section-title");
         Label updateSourceLabel = new Label(Messages.get("gui.settings.updateSource", updateSource));
         updateSourceLabel.setWrapText(true);
         updateSourceLabel.getStyleClass().add("settings-source");
-        GridPane updateGrid = new GridPane();
-        updateGrid.setAlignment(Pos.CENTER_LEFT);
-        updateGrid.getStyleClass().add("settings-grid");
+        GridPane updateGrid = createSettingsGrid();
         updateGrid.add(settingsLabel("gui.settings.updateChannel"), 0, 0);
         updateGrid.add(updateChannelSelector, 1, 0);
+        updateGrid.add(this.automaticUpdateChecks, 1, 1);
+        updateGrid.add(createOperationContent(applicationUpdateButton, applicationUpdateProgress,
+                applicationUpdateStatus, applicationUpdateError), 1, 2);
         VBox applicationUpdateSection = new VBox(
                 applicationUpdateTitle,
                 updateSourceLabel,
-                this.automaticUpdateChecks,
-                updateGrid,
-                applicationUpdateButton,
-                createStatusArea(applicationUpdateStatus, applicationUpdateError),
-                applicationUpdateProgress);
+                updateGrid);
         applicationUpdateSection.getStyleClass().add("settings-section");
 
-        Label metadataTitle = new Label(Messages.get("gui.settings.metadata"));
-        metadataTitle.getStyleClass().add("settings-section-title");
-        VBox metadataSection = new VBox(
-                metadataTitle, metadataUpdateButton,
-                createStatusArea(metadataUpdateStatus, metadataUpdateError), metadataUpdateProgress);
-        metadataSection.getStyleClass().add("settings-section");
-
-        this.root = new VBox(generalSection);
+        this.root = new VBox(generalGrid);
         if (buildInfo.applicationUpdatesEnabled()) {
             this.root.getChildren().add(applicationUpdateSection);
         }
-        this.root.getChildren().add(metadataSection);
         this.root.getStyleClass().add("settings-content");
         this.root.disableProperty().bind(busy);
     }
@@ -265,6 +261,38 @@ final class SettingsDialog {
         return label;
     }
 
+    /// Creates a form grid with aligned labels and a resizable control column.
+    ///
+    /// @return two-column settings grid.
+    private static GridPane createSettingsGrid() {
+        GridPane grid = new GridPane();
+        grid.getStyleClass().add("settings-grid");
+        grid.setAlignment(Pos.CENTER_LEFT);
+        ColumnConstraints labelColumn = new ColumnConstraints(90);
+        ColumnConstraints valueColumn = new ColumnConstraints();
+        valueColumn.setMinWidth(0);
+        valueColumn.setHgrow(Priority.ALWAYS);
+        grid.getColumnConstraints().addAll(labelColumn, valueColumn);
+        return grid;
+    }
+
+    /// Groups an operation button and progress indicator above a reserved status line.
+    ///
+    /// @param button operation action.
+    /// @param progress progress indicator whose space remains reserved while hidden.
+    /// @param status normal operation status.
+    /// @param error failure details shown instead of the normal status.
+    /// @return compact operation controls and feedback.
+    private static VBox createOperationContent(Button button, MFXProgressBar progress, Label status, Label error) {
+        button.setMinWidth(Region.USE_PREF_SIZE);
+        HBox actions = new HBox(12, button, progress);
+        actions.setAlignment(Pos.CENTER_LEFT);
+        VBox content = new VBox(6, actions, createStatusArea(status, error));
+        content.setMinWidth(0);
+        content.getStyleClass().add("settings-operation");
+        return content;
+    }
+
     /// Creates an initially hidden operation status label.
     ///
     /// @return operation status label.
@@ -284,8 +312,9 @@ final class SettingsDialog {
     /// @return initially hidden indeterminate progress bar.
     private static MFXProgressBar createProgressBar() {
         MFXProgressBar progress = new MFXProgressBar(ProgressBar.INDETERMINATE_PROGRESS);
-        progress.setPrefWidth(180);
-        progress.setMaxWidth(180);
+        progress.setMinWidth(80);
+        progress.setPrefWidth(100);
+        progress.setMaxWidth(100);
         progress.setVisible(false);
         return progress;
     }
