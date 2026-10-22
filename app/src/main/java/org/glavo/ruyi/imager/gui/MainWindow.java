@@ -255,6 +255,9 @@ public final class MainWindow {
     /// Operating system selection button.
     private final Button osButton = localizedButton("gui.button.chooseOs");
 
+    /// Catalog image download button shown next to the operating system selection button.
+    private final Button downloadOsButton = localizedButton("gui.button.downloadOs");
+
     /// Local image selection button.
     private final Button localImageButton = localizedButton("gui.button.useLocalImage");
 
@@ -584,6 +587,7 @@ public final class MainWindow {
         boardButton.setOnAction(_ -> chooseBoard());
 
         osButton.setOnAction(_ -> chooseOperatingSystem());
+        downloadOsButton.setOnAction(_ -> downloadSelectedImage());
 
         localImageButton.setOnAction(_ -> chooseLocalImage());
 
@@ -614,7 +618,7 @@ public final class MainWindow {
         VBox catalogSteps = new VBox(12,
                 createStep("1", "gui.step.manufacturer", manufacturerValue, manufacturerButton),
                 createStep("2", "gui.step.board", boardValue, boardButton),
-                createStep("3", "gui.step.os", osValue, osButton));
+                createStep("3", "gui.step.os", osValue, osButton, downloadOsButton));
 
         VBox catalogFlow = new VBox(12,
                 catalogTitle,
@@ -754,11 +758,11 @@ public final class MainWindow {
     /// @param number step number.
     /// @param titleKey step title key.
     /// @param value current step value.
-    /// @param action action button.
+    /// @param actions action buttons.
     /// @return workflow row.
-    private HBox createStep(String number, String titleKey, Label value, Node action) {
+    private HBox createStep(String number, String titleKey, Label value, Node... actions) {
         Label titleLabel = localizedLabel(titleKey);
-        return createStep(number, titleLabel, value, action);
+        return createStep(number, titleLabel, value, actions);
     }
 
     /// Creates one workflow row.
@@ -766,9 +770,9 @@ public final class MainWindow {
     /// @param number step number.
     /// @param titleLabel step title label.
     /// @param value current step value.
-    /// @param action action button.
+    /// @param actions action buttons.
     /// @return workflow row.
-    private HBox createStep(String number, Label titleLabel, Label value, Node action) {
+    private HBox createStep(String number, Label titleLabel, Label value, Node... actions) {
         Label badge = new Label(number);
         badge.getStyleClass().add("step-badge");
 
@@ -778,11 +782,15 @@ public final class MainWindow {
         text.setMinWidth(0);
         HBox.setHgrow(text, Priority.ALWAYS);
 
-        if (action instanceof Button button) {
-            button.getStyleClass().add("step-button");
-            button.setMinWidth(Region.USE_PREF_SIZE);
+        for (Node action : actions) {
+            if (action instanceof Button button) {
+                button.getStyleClass().add("step-button");
+                button.setMinWidth(Region.USE_PREF_SIZE);
+            }
         }
-        HBox row = new HBox(16, badge, text, action);
+        HBox actionBox = new HBox(8, actions);
+        actionBox.setAlignment(Pos.CENTER_LEFT);
+        HBox row = new HBox(16, badge, text, actionBox);
         row.setAlignment(Pos.CENTER_LEFT);
         row.getStyleClass().add("step-row");
         return row;
@@ -1943,6 +1951,57 @@ public final class MainWindow {
         });
     }
 
+    /// Downloads the selected catalog image into the local cache without a target device.
+    ///
+    /// Downloading ahead of time keeps the target connected only for the actual write, which
+    /// matters on slow networks and for boards that must stay in fastboot mode.
+    private void downloadSelectedImage() {
+        @Nullable ImageEntry selected = state.image();
+        if (selected == null || state.localImage() != null) {
+            return;
+        }
+        ImageEntry image = selected;
+        if (!canDownloadSelectedImage(image)) {
+            return;
+        }
+
+        Task<Path> task = new Task<>() {
+            /// Downloads the image outside the JavaFX application thread.
+            ///
+            /// @return local path of the downloaded image.
+            @Override
+            protected Path call() throws Exception {
+                LOGGER.info("Starting GUI image download. atom=" + image.atom());
+                return services.images().downloadImage(image, LoggingProgressReporter.wrap(event -> {
+                    updateMessage(event.message());
+                    @Nullable Long currentBytes = event.currentBytes();
+                    @Nullable Long totalBytes = event.totalBytes();
+                    if (currentBytes != null && totalBytes != null && totalBytes > 0L) {
+                        updateProgress(currentBytes, totalBytes);
+                    } else {
+                        updateProgress(ProgressBar.INDETERMINATE_PROGRESS, 1.0);
+                    }
+                }, LOGGER));
+            }
+        };
+
+        startBackgroundTask(task, Messages.get("gui.dialog.downloadFailed"), path -> showInfo(
+                Messages.get("gui.dialog.downloadComplete"),
+                Messages.get("gui.dialog.downloadComplete.message", path.toString())));
+    }
+
+    /// Returns whether the selected catalog image can be downloaded now.
+    ///
+    /// The action also stays available when the cached distfiles look complete: a cached file may
+    /// fail checksum verification, or the materialized artifact may be missing or unusable, and
+    /// downloading again verifies the distfiles and rebuilds the artifact.
+    ///
+    /// @param image selected catalog image.
+    /// @return whether the image can be downloaded now.
+    private boolean canDownloadSelectedImage(ImageEntry image) {
+        return imageCacheStatus(image).state() != ImageCacheStatus.State.MANUAL_REQUIRED;
+    }
+
     /// Starts a background task with the standard failure dialog.
     ///
     /// @param task task to run.
@@ -2333,6 +2392,11 @@ public final class MainWindow {
                 || state.localImage() != null
                 || state.manufacturerName() == null
                 || state.boardName() == null);
+        @Nullable ImageEntry selectedImage = state.image();
+        downloadOsButton.setDisable(busy.get()
+                || state.localImage() != null
+                || selectedImage == null
+                || !canDownloadSelectedImage(selectedImage));
         localImageButton.setDisable(busy.get());
         storageButton.setDisable(busy.get() || !hasImageSource());
         flashButton.setDisable(!canFlash());
