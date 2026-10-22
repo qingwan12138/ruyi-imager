@@ -23,6 +23,7 @@ import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.ScrollBar;
+import javafx.scene.control.Label;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
@@ -35,6 +36,7 @@ import javafx.stage.Stage;
 import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.AppServices;
 import org.glavo.ruyi.imager.core.OperationResult;
+import org.glavo.ruyi.imager.core.ProgressEvent;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
@@ -645,6 +647,202 @@ public final class MainWindowJavaFxSmokeTest {
         assertEquals(
                 List.of("download", "materialize", "fastboot"),
                 MainWindow.initialPhaseProgressStages(fastbootImage, FlashTarget.fastbootDevice(fastboot)));
+    }
+
+    /// Keeps a single-line footer stable across progress changes, scrolling, and flash-view transitions.
+    ///
+    /// @param width available window width.
+    /// @param directory isolated application directory.
+    /// @throws Exception when JavaFX execution or reflection fails.
+    @ParameterizedTest
+    @ValueSource(ints = {840, 1180, 1440})
+    public void separatesProgressFromLongStatus(int width, @TempDir Path directory) throws Exception {
+        runOnJavaFxThread(() -> {
+            MainWindow window = new MainWindow(testServices(directory));
+            try {
+                Scene scene = new Scene(window.root(), width, width == 840 ? 560 : 700);
+                scene.getStylesheets().add(applicationStylesheet());
+                Label status = assertInstanceOf(Label.class, windowField(window, "statusLabel"));
+                MFXProgressBar progress = assertInstanceOf(MFXProgressBar.class, windowField(window, "progressBar"));
+                Node settings = assertInstanceOf(Node.class, windowField(window, "settingsButton"));
+                window.root().applyCss();
+                window.root().layout();
+                Node header = window.root().lookup(".app-header");
+                Node footer = window.root().lookup(".app-status-bar");
+                Node flash = assertInstanceOf(Node.class, windowField(window, "flashButton"));
+                Node cancel = assertInstanceOf(Node.class, windowField(window, "cancelFlashButton"));
+                Node workflow = window.root().lookup(".workflow-scroll-pane");
+                double headerHeight = header.getLayoutBounds().getHeight();
+                double statusY = status.localToScene(status.getLayoutBounds()).getMinY();
+                var workflowBounds = workflow.localToScene(workflow.getLayoutBounds());
+                assertTrue(headerHeight <= 130);
+                assertEquals(32, footer.getLayoutBounds().getHeight(), 0.5);
+                assertEquals(scene.getHeight(), footer.localToScene(footer.getLayoutBounds()).getMaxY(), 0.5);
+                assertTrue(flash.getParent().getParent().isVisible());
+                assertFalse(cancel.getParent().getParent().isVisible());
+                assertAbove(header, workflow);
+                assertAbove(workflow, footer);
+                Node localOption = window.root().lookup(".independent-option-row");
+                Node firstStep = window.root().lookup(".step-row");
+                assertEquals(firstStep.localToScene(firstStep.getLayoutBounds()).getMinY(),
+                        localOption.localToScene(localOption.getLayoutBounds()).getMinY(), 0.5);
+                Label badge = assertInstanceOf(Label.class, window.root().lookup(".step-badge"));
+                assertEquals(Color.WHITE, badge.getTextFill());
+                assertEquals(34, badge.getWidth(), 0.5);
+                String detail = "Writing https://example.invalid/" + "long-image-directory/".repeat(20) + "root.img";
+                status.setText(detail);
+                progress.setVisible(true);
+                progress.setProgress(0.5);
+                window.root().layout();
+                assertEquals(statusY, status.localToScene(status.getLayoutBounds()).getMinY(), 0.5);
+                var statusBounds = status.localToScene(status.getLayoutBounds());
+                var progressBounds = progress.localToScene(progress.getLayoutBounds());
+                assertEquals(statusBounds.getCenterY(), progressBounds.getCenterY(), 0.5);
+                assertTrue(statusBounds.getMaxX() < progressBounds.getMinX());
+                var scrollPane = assertInstanceOf(javafx.scene.control.ScrollPane.class, workflow);
+                scrollPane.setVvalue(1);
+                window.root().layout();
+                assertEquals(statusY, status.localToScene(status.getLayoutBounds()).getMinY(), 0.5);
+                scrollPane.setVvalue(0);
+                var flashing = MainWindow.class.getDeclaredField("flashInProgress");
+                flashing.setAccessible(true);
+                var refresh = MainWindow.class.getDeclaredMethod("refreshState");
+                refresh.setAccessible(true);
+                flashing.setBoolean(window, true);
+                refresh.invoke(window);
+                assertFalse(flash.getParent().getParent().isVisible());
+                assertTrue(cancel.getParent().getParent().isVisible());
+
+                var update = MainWindow.class.getDeclaredMethod("updatePhaseProgress", long.class, ProgressEvent.class);
+                update.setAccessible(true);
+                long generation = (Long) windowField(window, "phaseProgressGeneration");
+                update.invoke(window, generation, new ProgressEvent("flash", detail, 50L, 100L));
+                window.root().applyCss();
+                window.root().layout();
+                assertEquals(headerHeight, header.getLayoutBounds().getHeight(), 0.5);
+                assertEquals(180, progress.getWidth(), 0.5);
+                assertEquals(detail, status.getTooltip().getText());
+                assertEquals(workflowBounds, workflow.localToScene(workflow.getLayoutBounds()));
+
+                Label message = assertInstanceOf(Label.class, window.root().lookup(".phase-progress-message"));
+                Node bar = window.root().lookup(".phase-progress-bar");
+                Label percent = assertInstanceOf(Label.class,
+                        window.root().lookup(".phase-progress-row .phase-progress-percent"));
+                assertEquals("50%", percent.getText());
+                assertAbove(bar, message);
+                assertEquals(status.localToScene(status.getLayoutBounds()).getCenterY(),
+                        progress.localToScene(progress.getLayoutBounds()).getCenterY(), 0.5);
+                assertAbove(settings, status);
+                assertTrue(message.getHeight() > percent.getHeight());
+                assertTrue(message.getWidth() <= message.getParent().getLayoutBounds().getWidth());
+                double barWidth = bar.getLayoutBounds().getWidth();
+
+                update.invoke(window, generation, new ProgressEvent("flash", "Complete", 100L, 100L));
+                window.root().layout();
+                assertEquals("100%", percent.getText());
+                assertEquals(barWidth, bar.getLayoutBounds().getWidth(), 0.5);
+                progress.setProgress(-1);
+                Label activityPercent = assertInstanceOf(Label.class, progress.getParent().lookup(".phase-progress-percent"));
+                assertEquals("", activityPercent.getText());
+                progress.setVisible(false);
+                status.setText("Ready");
+                flashing.setBoolean(window, false);
+                refresh.invoke(window);
+                window.root().layout();
+                assertTrue(progress.getParent().isManaged());
+                assertEquals(headerHeight, header.getLayoutBounds().getHeight(), 0.5);
+                assertEquals(statusY, status.localToScene(status.getLayoutBounds()).getMinY(), 0.5);
+                assertEquals(workflowBounds, workflow.localToScene(workflow.getLayoutBounds()));
+            } finally {
+                window.shutdown();
+            }
+            return null;
+        });
+    }
+
+    /// Keeps update progress separate from wrapping results and hides it on both success and failure.
+    ///
+    /// @param applicationUpdate whether to exercise the application rather than metadata update.
+    /// @param directory local manifest directory.
+    /// @throws Exception when JavaFX execution fails.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void separatesSettingsProgressAndResults(boolean applicationUpdate, @TempDir Path directory) throws Exception {
+        runOnJavaFxThread(() -> {
+            SettingsDialog settings = new SettingsDialog(Locale.ENGLISH,
+                    new BuildInfo("1.0.0", true), UpdateSource.of(directory.resolve("update.json")),
+                    true, UpdateChannel.STABLE, new SimpleBooleanProperty());
+            VBox root = assertInstanceOf(VBox.class, settings.root());
+            Label footer = new Label("Save settings");
+            VBox surface = new VBox(root, footer);
+            Scene scene = new Scene(surface, 560, 1000);
+            scene.getStylesheets().add(applicationStylesheet());
+            Node button = applicationUpdate ? settings.applicationUpdateButton() : settings.metadataUpdateButton();
+            Parent section = button.getParent();
+            surface.applyCss();
+            surface.layout();
+            double footerY = footer.localToScene(footer.getLayoutBounds()).getMinY();
+            if (applicationUpdate) {
+                settings.applicationUpdateStarted();
+            } else {
+                settings.metadataUpdateStarted();
+            }
+            surface.applyCss();
+            surface.layout();
+            assertEquals(footerY, footer.localToScene(footer.getLayoutBounds()).getMinY(), 0.5);
+            MFXProgressBar progress = assertInstanceOf(MFXProgressBar.class, section.lookup(".mfx-progress-bar"));
+            Label status = assertInstanceOf(Label.class, section.lookup(".settings-update-status"));
+            assertTrue(progress.isVisible());
+            assertTrue(progress.isManaged());
+            assertEquals(180, progress.getWidth(), 0.5);
+            assertEquals(-1, progress.getProgress());
+            assertAbove(button, status);
+            assertAbove(status, progress);
+
+            String failure = "Failed to update https://example.invalid/" + "long-repository-name/".repeat(30);
+            if (applicationUpdate) {
+                settings.applicationUpdateFailed(failure);
+            } else {
+                settings.metadataUpdateFinished(false, failure);
+            }
+            surface.layout();
+            assertFalse(progress.isVisible());
+            assertTrue(progress.isManaged());
+            assertFalse(status.isVisible());
+            assertFalse(status.isManaged());
+            Label error = assertInstanceOf(Label.class, section.lookup(".settings-update-error"));
+            assertEquals(failure, error.getText());
+            assertTrue(error.isVisible());
+            assertTrue(error.getHeight() >= error.prefHeight(error.getWidth()) - 0.5);
+            assertAbove(error, footer);
+            if (applicationUpdate) {
+                settings.applicationUpdateStarted();
+                settings.applicationUpdateFinished(false, "Up to date");
+            } else {
+                settings.metadataUpdateStarted();
+                settings.metadataUpdateFinished(true, "Metadata updated");
+            }
+            assertFalse(progress.isVisible());
+            assertTrue(status.isVisible());
+            assertFalse(error.isVisible());
+            assertFalse(error.isManaged());
+            assertEquals("", error.getText());
+            assertFalse(status.getStyleClass().contains("settings-update-error"));
+            assertFalse(button.isDisabled());
+            surface.layout();
+            assertEquals(footerY, footer.localToScene(footer.getLayoutBounds()).getMinY(), 0.5);
+            root.disableProperty().unbind();
+            return null;
+        });
+    }
+
+    /// Asserts that two laid-out nodes have disjoint vertical bounds in scene coordinates.
+    ///
+    /// @param upper node expected above the other node.
+    /// @param lower node expected below the other node.
+    private static void assertAbove(Node upper, Node lower) {
+        assertTrue(upper.localToScene(upper.getLayoutBounds()).getMaxY()
+                <= lower.localToScene(lower.getLayoutBounds()).getMinY() + 0.5);
     }
 
     /// Runs an action on the JavaFX application thread.

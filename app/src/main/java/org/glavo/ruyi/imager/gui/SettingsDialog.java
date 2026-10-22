@@ -5,6 +5,7 @@ package org.glavo.ruyi.imager.gui;
 
 import io.github.palexdev.materialfx.controls.MFXButton;
 import io.github.palexdev.materialfx.controls.MFXComboBox;
+import io.github.palexdev.materialfx.controls.MFXProgressBar;
 import javafx.application.Platform;
 import javafx.beans.value.ObservableBooleanValue;
 import javafx.collections.FXCollections;
@@ -14,7 +15,10 @@ import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.ProgressBar;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.util.StringConverter;
@@ -55,11 +59,23 @@ final class SettingsDialog {
     /// Application update status.
     private final Label applicationUpdateStatus;
 
+    /// Failure details for the most recent application update check.
+    private final Label applicationUpdateError = createStatusLabel();
+
+    /// Indeterminate progress shown while checking application updates.
+    private final MFXProgressBar applicationUpdateProgress = createProgressBar();
+
     /// Manual metadata update button.
     private final Button metadataUpdateButton;
 
     /// Manual metadata update status.
     private final Label metadataUpdateStatus;
+
+    /// Failure details for the most recent metadata update.
+    private final Label metadataUpdateError = createStatusLabel();
+
+    /// Indeterminate progress shown while updating repository metadata.
+    private final MFXProgressBar metadataUpdateProgress = createProgressBar();
 
     /// Creates settings controls with current values.
     ///
@@ -118,12 +134,15 @@ final class SettingsDialog {
                 this.automaticUpdateChecks,
                 updateGrid,
                 applicationUpdateButton,
-                applicationUpdateStatus);
+                createStatusArea(applicationUpdateStatus, applicationUpdateError),
+                applicationUpdateProgress);
         applicationUpdateSection.getStyleClass().add("settings-section");
 
         Label metadataTitle = new Label(Messages.get("gui.settings.metadata"));
         metadataTitle.getStyleClass().add("settings-section-title");
-        VBox metadataSection = new VBox(metadataTitle, metadataUpdateButton, metadataUpdateStatus);
+        VBox metadataSection = new VBox(
+                metadataTitle, metadataUpdateButton,
+                createStatusArea(metadataUpdateStatus, metadataUpdateError), metadataUpdateProgress);
         metadataSection.getStyleClass().add("settings-section");
 
         this.root = new VBox(generalSection);
@@ -180,6 +199,8 @@ final class SettingsDialog {
     /// Marks the application update check as active.
     void applicationUpdateStarted() {
         setOperationButtonsDisabled(true);
+        applicationUpdateProgress.setVisible(true);
+        hideStatus(applicationUpdateError);
         setStatus(
                 applicationUpdateStatus,
                 Messages.get("gui.progress.checkingForUpdates"),
@@ -192,6 +213,8 @@ final class SettingsDialog {
     /// @param message         update check result message.
     void applicationUpdateFinished(boolean updateAvailable, String message) {
         setOperationButtonsDisabled(false);
+        applicationUpdateProgress.setVisible(false);
+        hideStatus(applicationUpdateError);
         setStatus(
                 applicationUpdateStatus,
                 message,
@@ -203,12 +226,16 @@ final class SettingsDialog {
     /// @param message failure message.
     void applicationUpdateFailed(String message) {
         setOperationButtonsDisabled(false);
-        setStatus(applicationUpdateStatus, message, "settings-update-error");
+        applicationUpdateProgress.setVisible(false);
+        hideStatus(applicationUpdateStatus);
+        setStatus(applicationUpdateError, message, "settings-update-error");
     }
 
     /// Marks the manual metadata update as active.
     void metadataUpdateStarted() {
         setOperationButtonsDisabled(true);
+        metadataUpdateProgress.setVisible(true);
+        hideStatus(metadataUpdateError);
         setStatus(metadataUpdateStatus, Messages.get("gui.progress.updatingMetadata"), "settings-update-active");
     }
 
@@ -218,10 +245,14 @@ final class SettingsDialog {
     /// @param message    update result message.
     void metadataUpdateFinished(boolean successful, String message) {
         setOperationButtonsDisabled(false);
-        setStatus(
-                metadataUpdateStatus,
-                message,
-                successful ? "settings-update-success" : "settings-update-error");
+        metadataUpdateProgress.setVisible(false);
+        if (successful) {
+            hideStatus(metadataUpdateError);
+            setStatus(metadataUpdateStatus, message, "settings-update-success");
+        } else {
+            hideStatus(metadataUpdateStatus);
+            setStatus(metadataUpdateError, message, "settings-update-error");
+        }
     }
 
     /// Creates a settings row label.
@@ -240,10 +271,44 @@ final class SettingsDialog {
     private static Label createStatusLabel() {
         Label status = new Label();
         status.setWrapText(true);
+        status.setMinWidth(0);
+        status.setMinHeight(Region.USE_PREF_SIZE);
         status.setVisible(false);
         status.setManaged(false);
         status.getStyleClass().add("settings-update-status");
         return status;
+    }
+
+    /// Creates a compact progress bar whose layout space is retained while hidden.
+    ///
+    /// @return initially hidden indeterminate progress bar.
+    private static MFXProgressBar createProgressBar() {
+        MFXProgressBar progress = new MFXProgressBar(ProgressBar.INDETERMINATE_PROGRESS);
+        progress.setPrefWidth(180);
+        progress.setMaxWidth(180);
+        progress.setVisible(false);
+        return progress;
+    }
+
+    /// Reserves one status line while allowing longer results and errors to wrap.
+    ///
+    /// @param status normal operation status.
+    /// @param error failure details, shown instead of the normal status.
+    /// @return shared status area.
+    private static StackPane createStatusArea(Label status, Label error) {
+        StackPane area = new StackPane(status, error);
+        area.setAlignment(Pos.CENTER_LEFT);
+        area.setMinHeight(24);
+        return area;
+    }
+
+    /// Clears a status label and removes its layout space.
+    ///
+    /// @param status label to clear and hide.
+    private static void hideStatus(Label status) {
+        status.setText("");
+        status.setVisible(false);
+        status.setManaged(false);
     }
 
     /// Enables or disables settings operations together.

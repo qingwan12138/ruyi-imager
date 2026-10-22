@@ -87,6 +87,17 @@
     -fx-padding: 30 32 30 32;
 }
 
+.app-status-bar {
+    -fx-background-color: -ruyi-background;
+    -fx-border-color: #e5e7eb transparent transparent transparent;
+    -fx-padding: 5 32;
+}
+
+.app-status-text {
+    -fx-font-size: 12px;
+    -fx-text-fill: #5a6673;
+}
+
 .workflow-scroll-pane {
     -fx-background-color: transparent;
     -fx-background: transparent;

@@ -7,6 +7,7 @@ import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
 import javafx.beans.property.ReadOnlyBooleanWrapper;
 import javafx.collections.FXCollections;
 import javafx.collections.transformation.FilteredList;
@@ -20,6 +21,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
 import javafx.scene.control.TreeCell;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
@@ -457,6 +459,7 @@ public final class MainWindow {
         pane.getStyleClass().add("app-root");
         pane.setTop(createHeader());
         pane.setCenter(createWorkflowScrollPane());
+        pane.setBottom(createStatusBar());
         return pane;
     }
 
@@ -474,7 +477,7 @@ public final class MainWindow {
     /// Creates the window header.
     ///
     /// @return header node.
-    private VBox createHeader() {
+    private HBox createHeader() {
         Label title = localizedLabel("app.title");
         title.getStyleClass().add("app-title");
 
@@ -482,25 +485,64 @@ public final class MainWindow {
         subtitle.getStyleClass().add("app-subtitle");
 
         VBox titleText = new VBox(2, title, subtitle);
+        titleText.setMinWidth(0);
         titleText.getStyleClass().add("app-title-text");
-
-        HBox titleRow = new HBox(16, createHeaderLogo(), titleText);
-        titleRow.setAlignment(Pos.CENTER_LEFT);
 
         settingsButton.setOnAction(_ -> showSettings());
         settingsButton.getStyleClass().add("header-button");
+        settingsButton.setMinWidth(Region.USE_PREF_SIZE);
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox status = new HBox(12, statusLabel, progressBar, spacer, settingsButton);
-        status.setAlignment(Pos.CENTER_LEFT);
-        progressBar.setPrefWidth(180);
-        progressBar.setVisible(false);
+        HBox titleRow = new HBox(16, createHeaderLogo(), titleText, spacer, settingsButton);
+        titleRow.setAlignment(Pos.CENTER_LEFT);
+        titleRow.getStyleClass().add("app-header");
+        return titleRow;
+    }
 
-        VBox header = new VBox(10, titleRow, status);
-        header.getStyleClass().add("app-header");
-        return header;
+    /// Creates a fixed-height footer with status text and a compact progress indicator on one line.
+    ///
+    /// @return global status bar below the scrollable workflow.
+    private HBox createStatusBar() {
+        statusLabel.getStyleClass().add("app-status-text");
+        statusLabel.setWrapText(false);
+        statusLabel.setMinWidth(0);
+        statusLabel.setMinHeight(20);
+        statusLabel.setPrefHeight(20);
+        statusLabel.setMaxHeight(20);
+        statusLabel.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(statusLabel, Priority.ALWAYS);
+        Tooltip statusTooltip = new Tooltip();
+        statusTooltip.textProperty().bind(statusLabel.textProperty());
+        statusTooltip.setWrapText(true);
+        statusTooltip.setMaxWidth(520);
+        statusLabel.setTooltip(statusTooltip);
+        progressBar.setPrefWidth(180);
+        progressBar.setMinWidth(180);
+        progressBar.setMaxWidth(180);
+        progressBar.setVisible(false);
+        Label percent = new Label();
+        percent.getStyleClass().add("phase-progress-percent");
+        percent.setMinWidth(44);
+        percent.setPrefWidth(44);
+        percent.setMaxWidth(44);
+        percent.textProperty().bind(Bindings.createStringBinding(
+                () -> progressBar.getProgress() < 0 ? "" : percentText(progressBar.getProgress()),
+                progressBar.progressProperty()));
+        HBox progress = new HBox(10, progressBar, percent);
+        progress.setAlignment(Pos.CENTER_LEFT);
+        progress.setMinWidth(Region.USE_PREF_SIZE);
+        progress.setMaxWidth(Region.USE_PREF_SIZE);
+        progress.visibleProperty().bind(progressBar.visibleProperty());
+        HBox status = new HBox(16, statusLabel, progress);
+        status.setAlignment(Pos.CENTER_LEFT);
+        status.getStyleClass().add("app-status-bar");
+        status.setMinWidth(0);
+        status.setMinHeight(32);
+        status.setPrefHeight(32);
+        status.setMaxHeight(32);
+        return status;
     }
 
     /// Creates the logo node shown beside the application title.
@@ -733,10 +775,12 @@ public final class MainWindow {
         titleLabel.getStyleClass().add("step-title");
         value.getStyleClass().add("step-value");
         VBox text = new VBox(4, titleLabel, value);
+        text.setMinWidth(0);
         HBox.setHgrow(text, Priority.ALWAYS);
 
         if (action instanceof Button button) {
             button.getStyleClass().add("step-button");
+            button.setMinWidth(Region.USE_PREF_SIZE);
         }
         HBox row = new HBox(16, badge, text, action);
         row.setAlignment(Pos.CENTER_LEFT);
@@ -2205,14 +2249,17 @@ public final class MainWindow {
 
         Label message = new Label();
         message.getStyleClass().add("phase-progress-message");
+        message.setMinWidth(0);
+        message.setMinHeight(Region.USE_PREF_SIZE);
         message.setMaxWidth(Double.MAX_VALUE);
         message.setWrapText(true);
-        HBox.setHgrow(message, Priority.ALWAYS);
 
         Label percent = new Label();
         percent.getStyleClass().add("phase-progress-percent");
 
-        HBox header = new HBox(10, title, message, percent);
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox header = new HBox(10, title, spacer, percent);
         header.getStyleClass().add("phase-progress-header");
         header.setAlignment(Pos.CENTER_LEFT);
         header.setMaxWidth(Double.MAX_VALUE);
@@ -2221,7 +2268,7 @@ public final class MainWindow {
         rowProgressBar.getStyleClass().add("phase-progress-bar");
         rowProgressBar.setMaxWidth(Double.MAX_VALUE);
 
-        VBox container = new VBox(6, header, rowProgressBar);
+        VBox container = new VBox(6, header, rowProgressBar, message);
         container.getStyleClass().add("phase-progress-row");
         container.setMaxWidth(Double.MAX_VALUE);
         phaseProgressBox.getChildren().add(container);
