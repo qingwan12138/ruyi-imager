@@ -7,6 +7,7 @@ import org.glavo.ruyi.imager.core.ProvisionStrategies;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
 import org.glavo.ruyi.imager.core.flash.FlashTarget;
+import org.glavo.ruyi.imager.core.image.ImageBoard;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -104,6 +105,85 @@ final class GuiSelectionRules {
             return !image.partitionMap().isEmpty();
         }
         return ProvisionStrategies.isFastboot(image.strategy()) && !image.partitionMap().isEmpty();
+    }
+
+    /// Returns whether an image entry matches a manufacturer and board selection.
+    ///
+    /// @param image image entry.
+    /// @param manufacturerName selected manufacturer name, or null to accept any manufacturer.
+    /// @param boardName selected board name, or null to accept any board.
+    /// @return whether the image supports the selection.
+    static boolean matchesBoard(
+            ImageEntry image,
+            @Nullable String manufacturerName,
+            @Nullable String boardName) {
+        if (manufacturerName != null && boardName != null) {
+            for (ImageBoard board : image.boards()) {
+                if (manufacturerName.equals(board.manufacturer()) && boardName.equals(board.board())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (manufacturerName != null) {
+            return matchesManufacturer(image, manufacturerName);
+        }
+        if (boardName != null) {
+            return matchesDevice(image, boardName);
+        }
+        return true;
+    }
+
+    /// Returns whether an image entry belongs to a manufacturer.
+    ///
+    /// @param image image entry.
+    /// @param manufacturerName manufacturer name.
+    /// @return whether the image belongs to the manufacturer.
+    static boolean matchesManufacturer(ImageEntry image, String manufacturerName) {
+        if (image.manufacturer().equals(manufacturerName)) {
+            return true;
+        }
+        for (ImageBoard board : image.boards()) {
+            if (manufacturerName.equals(board.manufacturer())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Returns whether an image entry declares a board.
+    ///
+    /// @param image image entry.
+    /// @param boardName board name.
+    /// @return whether the image supports the board.
+    static boolean matchesDevice(ImageEntry image, String boardName) {
+        for (ImageBoard board : image.boards()) {
+            if (boardName.equals(board.board())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Returns the board variant displayed for one image.
+    ///
+    /// @param image image entry.
+    /// @param manufacturerName selected manufacturer name, or null to accept any manufacturer.
+    /// @param boardName selected board name, or null to accept any board.
+    /// @return variant of the matching board, or the primary variant when no board matches.
+    static String variantFor(
+            ImageEntry image,
+            @Nullable String manufacturerName,
+            @Nullable String boardName) {
+        for (ImageBoard board : image.boards()) {
+            boolean boardMatches = boardName == null || boardName.equals(board.board());
+            boolean manufacturerMatches = manufacturerName == null
+                    || manufacturerName.equals(board.manufacturer());
+            if (boardMatches && manufacturerMatches) {
+                return board.variant();
+            }
+        }
+        return image.variant();
     }
 
     /// Returns whether a target can be written by the GUI.

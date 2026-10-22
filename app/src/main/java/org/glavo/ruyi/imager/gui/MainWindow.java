@@ -59,6 +59,7 @@ import org.glavo.ruyi.imager.core.flash.FlashRequest;
 import org.glavo.ruyi.imager.core.flash.FlashTarget;
 import org.glavo.ruyi.imager.core.image.ImageCacheStatus;
 import org.glavo.ruyi.imager.core.image.ImageCatalog;
+import org.glavo.ruyi.imager.core.image.ImageBoard;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
 import org.glavo.ruyi.imager.i18n.Messages;
 import org.glavo.ruyi.imager.logging.LoggingProgressReporter;
@@ -89,6 +90,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -1556,7 +1558,11 @@ public final class MainWindow {
                     getStyleClass().add("os-category-tree-cell");
                 } else {
                     setText(null);
-                    setGraphic(imageCellContent(image, cacheStatus(cacheStatuses, image)));
+                    setGraphic(imageCellContent(
+                            image,
+                            cacheStatus(cacheStatuses, image),
+                            state.manufacturerName(),
+                            state.boardName()));
                     getStyleClass().add(catalogImageFlashable(image)
                             ? "flashable-image-cell"
                             : "unsupported-image-cell");
@@ -1568,8 +1574,8 @@ public final class MainWindow {
             @Nullable ImageEntry selected = selectedTreeImage(treeView);
             if (selected != null) {
                 state = new WizardState(
-                        selected.manufacturer(),
-                        selected.board(),
+                        state.manufacturerName(),
+                        state.boardName(),
                         selected,
                         null,
                         compatibleTarget(state.target(), selected, null));
@@ -2583,7 +2589,9 @@ public final class MainWindow {
         }
 
         @Nullable ImageEntry image = state.image();
-        return image == null ? Messages.get("gui.value.os.none") : imageLabel(image, imageCacheStatus(image));
+        return image == null
+                ? Messages.get("gui.value.os.none")
+                : imageLabel(image, imageCacheStatus(image), state.manufacturerName(), state.boardName());
     }
 
     /// Formats the selected local image option.
@@ -2605,7 +2613,7 @@ public final class MainWindow {
     private String imageSourceLabel() {
         @Nullable ImageEntry image = state.image();
         if (image != null) {
-            return imageLabel(image, imageCacheStatus(image));
+            return imageLabel(image, imageCacheStatus(image), state.manufacturerName(), state.boardName());
         }
 
         @Nullable Path localImage = state.localImage();
@@ -2625,11 +2633,17 @@ public final class MainWindow {
         Map<String, Integer> imageCounts = new LinkedHashMap<>();
         Map<String, List<String>> boardNames = new LinkedHashMap<>();
         for (ImageEntry image : images) {
-            String manufacturer = image.manufacturer();
-            imageCounts.merge(manufacturer, 1, Integer::sum);
-            List<String> boards = boardNames.computeIfAbsent(manufacturer, _ -> new ArrayList<>());
-            if (!boards.contains(image.board())) {
-                boards.add(image.board());
+            LinkedHashSet<String> manufacturers = new LinkedHashSet<>();
+            manufacturers.add(image.manufacturer());
+            for (ImageBoard board : image.boards()) {
+                manufacturers.add(board.manufacturer());
+                List<String> boards = boardNames.computeIfAbsent(board.manufacturer(), _ -> new ArrayList<>());
+                if (!boards.contains(board.board())) {
+                    boards.add(board.board());
+                }
+            }
+            for (String manufacturer : manufacturers) {
+                imageCounts.merge(manufacturer, 1, Integer::sum);
             }
         }
 
@@ -2656,8 +2670,12 @@ public final class MainWindow {
             @Nullable String manufacturerName) {
         Map<String, Integer> counts = new LinkedHashMap<>();
         for (ImageEntry image : images) {
-            if (manufacturerName == null || image.manufacturer().equals(manufacturerName)) {
-                counts.merge(image.board(), 1, Integer::sum);
+            LinkedHashSet<String> imageBoards = new LinkedHashSet<>();
+            for (ImageBoard board : image.boards()) {
+                if ((manufacturerName == null || manufacturerName.equals(board.manufacturer()))
+                        && imageBoards.add(board.board())) {
+                    counts.merge(board.board(), 1, Integer::sum);
+                }
             }
         }
 
@@ -2685,8 +2703,7 @@ public final class MainWindow {
 
         ArrayList<ImageEntry> filtered = new ArrayList<>();
         for (ImageEntry image : images) {
-            if ((manufacturerName == null || image.manufacturer().equals(manufacturerName))
-                    && (boardName == null || image.board().equals(boardName))) {
+            if (GuiSelectionRules.matchesBoard(image, manufacturerName, boardName)) {
                 filtered.add(image);
             }
         }
@@ -2957,15 +2974,24 @@ public final class MainWindow {
     /// @param query normalized query.
     /// @return whether the image matches.
     private static boolean imageMatches(ImageEntry image, String query) {
-        return textMatches(image.displayName(), query)
+        if (textMatches(image.displayName(), query)
                 || textMatches(operatingSystemCategoryName(image), query)
                 || textMatches(image.manufacturer(), query)
                 || textMatches(ManufacturerNames.displayName(image.manufacturer()), query)
-                || textMatches(image.board(), query)
-                || textMatches(image.variant(), query)
                 || textMatches(image.strategy(), query)
                 || textMatches(image.atom(), query)
-                || textMatches(imageSupportLabel(image), query);
+                || textMatches(imageSupportLabel(image), query)) {
+            return true;
+        }
+        for (ImageBoard board : image.boards()) {
+            if (textMatches(board.board(), query)
+                    || textMatches(board.variant(), query)
+                    || textMatches(board.manufacturer(), query)
+                    || textMatches(ManufacturerNames.displayName(board.manufacturer()), query)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Returns whether a target device matches a search query.
@@ -3063,15 +3089,21 @@ public final class MainWindow {
     ///
     /// @param image image entry.
     /// @param cacheStatus image cache status.
+    /// @param manufacturerName selected manufacturer name, or null to accept any manufacturer.
+    /// @param boardName selected board name, or null to accept any board.
     /// @return cell content.
-    private static Node imageCellContent(ImageEntry image, ImageCacheStatus cacheStatus) {
+    private static Node imageCellContent(
+            ImageEntry image,
+            ImageCacheStatus cacheStatus,
+            @Nullable String manufacturerName,
+            @Nullable String boardName) {
         Label title = new Label(image.displayName());
         title.setWrapText(true);
         title.getStyleClass().add("selection-title");
 
         Label details = new Label(Messages.get(
                 "gui.image.details",
-                image.variant(),
+                GuiSelectionRules.variantFor(image, manufacturerName, boardName),
                 image.strategy(),
                 imageCacheStatusLabel(cacheStatus)));
         details.setWrapText(true);
@@ -3154,12 +3186,18 @@ public final class MainWindow {
     ///
     /// @param image image entry.
     /// @param cacheStatus image cache status.
+    /// @param manufacturerName selected manufacturer name, or null to accept any manufacturer.
+    /// @param boardName selected board name, or null to accept any board.
     /// @return display text.
-    private static String imageLabel(ImageEntry image, ImageCacheStatus cacheStatus) {
+    private static String imageLabel(
+            ImageEntry image,
+            ImageCacheStatus cacheStatus,
+            @Nullable String manufacturerName,
+            @Nullable String boardName) {
         return Messages.get(
                 "gui.image.summary",
                 image.displayName(),
-                image.variant(),
+                GuiSelectionRules.variantFor(image, manufacturerName, boardName),
                 image.strategy(),
                 imageSupportLabel(image),
                 imageCacheStatusLabel(cacheStatus));

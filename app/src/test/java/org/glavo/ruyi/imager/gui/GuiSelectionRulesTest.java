@@ -7,6 +7,7 @@ import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
 import org.glavo.ruyi.imager.core.fastboot.FastbootDevice;
 import org.glavo.ruyi.imager.core.flash.FlashTarget;
+import org.glavo.ruyi.imager.core.image.ImageBoard;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Unmodifiable;
@@ -212,12 +213,81 @@ public final class GuiSelectionRulesTest {
                         readonly)));
     }
 
+    /// Verifies that only declared manufacturer and board pairs select a multi-board image.
+    @Test
+    public void matchesDeclaredBoardPairsOnly() {
+        ImageEntry image = multiBoardImage();
+
+        assertTrue(GuiSelectionRules.matchesBoard(image, "Vendor A", "board-a"));
+        assertTrue(GuiSelectionRules.matchesBoard(image, "Vendor B", "board-b"));
+        assertTrue(GuiSelectionRules.matchesBoard(image, null, "board-b"));
+        assertTrue(GuiSelectionRules.matchesBoard(image, "Vendor B", null));
+        assertTrue(GuiSelectionRules.matchesBoard(image, null, "board-c"));
+        assertTrue(GuiSelectionRules.matchesBoard(
+                image, ImageBoard.UNKNOWN_MANUFACTURER, "board-c"));
+        assertTrue(GuiSelectionRules.matchesBoard(image, null, null));
+
+        assertFalse(GuiSelectionRules.matchesBoard(image, "Vendor A", "board-b"));
+        assertFalse(GuiSelectionRules.matchesBoard(image, "Vendor B", "board-a"));
+        assertFalse(GuiSelectionRules.matchesBoard(image, "Vendor A", "board-c"));
+        assertFalse(GuiSelectionRules.matchesBoard(image, "Vendor C", "board-a"));
+    }
+
+    /// Verifies that a board with an unknown manufacturer stays selectable through the unknown group.
+    @Test
+    public void keepsUnknownManufacturerBoardsSelectable() {
+        ImageEntry image = multiBoardImage();
+
+        assertTrue(GuiSelectionRules.matchesManufacturer(image, ImageBoard.UNKNOWN_MANUFACTURER));
+        assertTrue(GuiSelectionRules.matchesDevice(image, "board-c"));
+        assertEquals("vc", GuiSelectionRules.variantFor(
+                image, ImageBoard.UNKNOWN_MANUFACTURER, "board-c"));
+    }
+
+    /// Verifies that the displayed variant comes from the selected board pair.
+    @Test
+    public void reportsVariantOfSelectedBoardPair() {
+        ImageEntry image = multiBoardImage();
+
+        assertEquals("va", GuiSelectionRules.variantFor(image, "Vendor A", "board-a"));
+        assertEquals("vb", GuiSelectionRules.variantFor(image, "Vendor B", "board-b"));
+        assertEquals("vc", GuiSelectionRules.variantFor(image, null, "board-c"));
+        assertEquals("va", GuiSelectionRules.variantFor(image, "Vendor A", "board-b"));
+    }
+
+    /// Creates a test image entry declaring boards from two manufacturers and one unknown manufacturer.
+    ///
+    /// @return test image entry.
+    private static ImageEntry multiBoardImage() {
+        return new ImageEntry(
+                "ruyisdk",
+                "board-image",
+                "multi-board",
+                "1.0.0",
+                null,
+                "board-image/multi-board(1.0.0)",
+                "Multi-board image",
+                "Vendor A",
+                "board-a",
+                "va",
+                "dd-v1",
+                Map.of("disk", "image.raw"),
+                List.of(),
+                StrategySupport.SUPPORTED,
+                List.of(),
+                List.of(
+                        new ImageBoard("Vendor A", "board-a", "va"),
+                        new ImageBoard("Vendor B", "board-b", "vb"),
+                        new ImageBoard(ImageBoard.UNKNOWN_MANUFACTURER, "board-c", "vc")));
+    }
+
     /// Creates a test image entry.
     ///
     /// @param strategy provision strategy.
     /// @param partitionMap partition map.
     /// @return test image entry.
     private static ImageEntry image(String strategy, @Unmodifiable Map<String, String> partitionMap) {
+
         return image(strategy, partitionMap, StrategySupport.SUPPORTED);
     }
 

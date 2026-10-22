@@ -72,6 +72,139 @@ public final class RuyiImageCatalogServiceTest {
         assertEquals(List.of("images"), distfile.prefixesToUnpack());
     }
 
+    /// Verifies that a combo declaring several related devices is listed for every board.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when test fixture files cannot be created or read.
+    @Test
+    public void listsComboImagesForEveryRelatedBoard(@TempDir Path temporaryDirectory) throws Exception {
+        Path configDirectory = temporaryDirectory.resolve("config");
+        Path cacheDirectory = temporaryDirectory.resolve("cache");
+        Path repoDirectory = temporaryDirectory.resolve("repo");
+        Files.createDirectories(configDirectory);
+        writeConfig(configDirectory, repoDirectory);
+        writeRepository(repoDirectory);
+
+        Path comboDirectory = repoDirectory.resolve("entities").resolve("image-combo");
+        Files.createDirectories(comboDirectory);
+        Files.writeString(
+                comboDirectory.resolve("revyos-milkv-meles@multi.toml"),
+                """
+                        ruyi-entity = "v0"
+
+                        related = [
+                          "device-variant:milkv-meles@generic",
+                          "device-variant:sipeed-licheerv@generic",
+                        ]
+
+                        [image-combo]
+                        display_name = "Multi-board image"
+                        package_atoms = ["board-image/revyos-milkv-meles"]
+                        """);
+
+        RuyiImageCatalogService service = new RuyiImageCatalogService(
+                new AppDirectories(configDirectory, cacheDirectory),
+                new RuyiRepositoryStore(new AppDirectories(configDirectory, cacheDirectory)));
+
+        @Nullable ImageEntry combo = service.findImage("image-combo/revyos-milkv-meles@multi");
+
+        assertNotNull(combo);
+        assertEquals("milkv-meles", combo.board());
+        assertEquals("generic", combo.variant());
+        assertEquals("Milk-V", combo.manufacturer());
+        assertEquals(
+                List.of(
+                        new ImageBoard("Milk-V", "milkv-meles", "generic"),
+                        new ImageBoard("Sipeed", "sipeed-licheerv", "generic")),
+                combo.boards());
+    }
+
+    /// Verifies that secondary boards with unknown prefixes are grouped under the unknown manufacturer.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when test fixture files cannot be created or read.
+    @Test
+    public void keepsUnmappedSecondaryBoardManufacturerUnknown(@TempDir Path temporaryDirectory) throws Exception {
+        Path configDirectory = temporaryDirectory.resolve("config");
+        Path cacheDirectory = temporaryDirectory.resolve("cache");
+        Path repoDirectory = temporaryDirectory.resolve("repo");
+        Files.createDirectories(configDirectory);
+        writeConfig(configDirectory, repoDirectory);
+        writeRepository(repoDirectory);
+
+        Path comboDirectory = repoDirectory.resolve("entities").resolve("image-combo");
+        Files.createDirectories(comboDirectory);
+        Files.writeString(
+                comboDirectory.resolve("revyos-milkv-meles@unknown.toml"),
+                """
+                        ruyi-entity = "v0"
+
+                        related = [
+                          "device-variant:milkv-meles@generic",
+                          "device-variant:unmappedvendor-board@generic",
+                        ]
+
+                        [image-combo]
+                        display_name = "Partially mapped image"
+                        package_atoms = ["board-image/revyos-milkv-meles"]
+                        """);
+
+        RuyiImageCatalogService service = new RuyiImageCatalogService(
+                new AppDirectories(configDirectory, cacheDirectory),
+                new RuyiRepositoryStore(new AppDirectories(configDirectory, cacheDirectory)));
+
+        @Nullable ImageEntry combo = service.findImage("image-combo/revyos-milkv-meles@unknown");
+
+        assertNotNull(combo);
+        assertEquals("Milk-V", combo.manufacturer());
+        assertEquals(
+                List.of(
+                        new ImageBoard("Milk-V", "milkv-meles", "generic"),
+                        new ImageBoard(ImageBoard.UNKNOWN_MANUFACTURER, "unmappedvendor-board", "generic")),
+                combo.boards());
+    }
+
+    /// Verifies that an unmapped primary board keeps the image manufacturer for compatibility.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when test fixture files cannot be created or read.
+    @Test
+    public void keepsImageManufacturerForUnmappedPrimaryBoard(@TempDir Path temporaryDirectory) throws Exception {
+        Path configDirectory = temporaryDirectory.resolve("config");
+        Path cacheDirectory = temporaryDirectory.resolve("cache");
+        Path repoDirectory = temporaryDirectory.resolve("repo");
+        Files.createDirectories(configDirectory);
+        writeConfig(configDirectory, repoDirectory);
+        writeRepository(repoDirectory);
+
+        Path comboDirectory = repoDirectory.resolve("entities").resolve("image-combo");
+        Files.createDirectories(comboDirectory);
+        Files.writeString(
+                comboDirectory.resolve("revyos-milkv-meles@primary.toml"),
+                """
+                        ruyi-entity = "v0"
+
+                        related = [
+                          "device-variant:unmappedvendor-board@generic",
+                        ]
+
+                        [image-combo]
+                        display_name = "Unmapped primary board image"
+                        package_atoms = ["board-image/revyos-milkv-meles"]
+                        """);
+
+        RuyiImageCatalogService service = new RuyiImageCatalogService(
+                new AppDirectories(configDirectory, cacheDirectory),
+                new RuyiRepositoryStore(new AppDirectories(configDirectory, cacheDirectory)));
+
+        @Nullable ImageEntry combo = service.findImage("image-combo/revyos-milkv-meles@primary");
+
+        assertNotNull(combo);
+        assertEquals(
+                List.of(new ImageBoard("Milk-V", "unmappedvendor-board", "generic")),
+                combo.boards());
+    }
+
     /// Verifies image metadata is cached until explicitly invalidated.
     ///
     /// @param temporaryDirectory temporary test directory.

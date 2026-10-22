@@ -50,6 +50,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -61,6 +62,7 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -453,6 +455,38 @@ public final class CliApplicationTest {
         assertEquals("dd-v1", image.path("strategy").asText());
         assertEquals("SUPPORTED", image.path("support").asText());
         assertEquals("image.raw", image.path("partitionMap").path("disk").asText());
+
+        assertEquals(
+                Set.of(
+                        "repoId",
+                        "category",
+                        "name",
+                        "version",
+                        "slug",
+                        "atom",
+                        "displayName",
+                        "manufacturer",
+                        "board",
+                        "variant",
+                        "strategy",
+                        "partitionMap",
+                        "distfiles",
+                        "support",
+                        "components"),
+                fieldNames(image));
+        assertFalse(image.has("boards"));
+        assertEquals("image.raw", image.path("distfiles").path(0).path("name").asText());
+        assertTrue(image.path("components").path(0).path("atom").asText().startsWith("board-image/"));
+    }
+
+    /// Collects the field names of a JSON object.
+    ///
+    /// @param node JSON object.
+    /// @return field names of the object.
+    private static @Unmodifiable Set<String> fieldNames(JsonNode node) {
+        Set<String> names = new LinkedHashSet<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return Set.copyOf(names);
     }
 
     /// Downloads a cached fixture distfile and materializes it through the public CLI.

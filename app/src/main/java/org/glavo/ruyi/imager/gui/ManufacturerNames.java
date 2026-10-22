@@ -3,6 +3,7 @@
 
 package org.glavo.ruyi.imager.gui;
 
+import org.glavo.ruyi.imager.core.image.ImageBoard;
 import org.glavo.ruyi.imager.i18n.Messages;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -23,7 +24,8 @@ final class ManufacturerNames {
             Map.entry("Sipeed", "gui.manufacturer.sipeed"),
             Map.entry("SpacemiT", "gui.manufacturer.spacemit"),
             Map.entry("StarFive", "gui.manufacturer.starfive"),
-            Map.entry("WinChipHead", "gui.manufacturer.wch"));
+            Map.entry("WinChipHead", "gui.manufacturer.wch"),
+            Map.entry(ImageBoard.UNKNOWN_MANUFACTURER, "gui.manufacturer.unknown"));
 
     /// Prevents construction of the utility class.
     private ManufacturerNames() {

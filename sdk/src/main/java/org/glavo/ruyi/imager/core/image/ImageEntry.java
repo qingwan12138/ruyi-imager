@@ -30,6 +30,7 @@ import java.util.Map;
 /// @param distfiles distfiles required by the image.
 /// @param support strategy support state.
 /// @param components provisionable package components in flashing order.
+/// @param boards boards this image can be provisioned for.
 @NotNullByDefault
 public record ImageEntry(
         String repoId,
@@ -46,7 +47,8 @@ public record ImageEntry(
         @Unmodifiable Map<String, String> partitionMap,
         @Unmodifiable List<RuyiDistfile> distfiles,
         StrategySupport support,
-        @Unmodifiable List<ImageComponent> components) {
+        @Unmodifiable List<ImageComponent> components,
+        @Unmodifiable List<ImageBoard> boards) {
     /// Creates a single-component image entry.
     ///
     /// @param repoId source repository id.
@@ -93,13 +95,69 @@ public record ImageEntry(
                 partitionMap,
                 distfiles,
                 support,
-                List.of(new ImageComponent(category, name, version, atom, strategy, partitionMap, distfiles)));
+                List.of(new ImageComponent(category, name, version, atom, strategy, partitionMap, distfiles)),
+                List.of(new ImageBoard(manufacturer, board, variant)));
     }
 
-    /// Copies collections into immutable instances.
+    /// Creates an image entry whose boards are derived from its primary board.
+    ///
+    /// @param repoId source repository id.
+    /// @param category Ruyi package category.
+    /// @param name Ruyi package name.
+    /// @param version Ruyi package version.
+    /// @param slug deprecated Ruyi package slug when present.
+    /// @param atom exact Ruyi atom name.
+    /// @param displayName human-readable image name.
+    /// @param manufacturer device or image manufacturer name.
+    /// @param board target board name.
+    /// @param variant board or image variant name.
+    /// @param strategy Ruyi provisioning strategy name.
+    /// @param partitionMap image partition map.
+    /// @param distfiles distfiles required by the image.
+    /// @param support strategy support state.
+    /// @param components provisionable package components in flashing order.
+    public ImageEntry(
+            String repoId,
+            String category,
+            String name,
+            String version,
+            @Nullable String slug,
+            String atom,
+            String displayName,
+            String manufacturer,
+            String board,
+            String variant,
+            String strategy,
+            @Unmodifiable Map<String, String> partitionMap,
+            @Unmodifiable List<RuyiDistfile> distfiles,
+            StrategySupport support,
+            @Unmodifiable List<ImageComponent> components) {
+        this(
+                repoId,
+                category,
+                name,
+                version,
+                slug,
+                atom,
+                displayName,
+                manufacturer,
+                board,
+                variant,
+                strategy,
+                partitionMap,
+                distfiles,
+                support,
+                components,
+                List.of(new ImageBoard(manufacturer, board, variant)));
+    }
+
+    /// Copies collections into immutable instances and derives the primary board when none is declared.
     public ImageEntry {
         partitionMap = Collections.unmodifiableMap(new LinkedHashMap<>(partitionMap));
         distfiles = List.copyOf(distfiles);
         components = List.copyOf(components);
+        boards = boards.isEmpty()
+                ? List.of(new ImageBoard(manufacturer, board, variant))
+                : List.copyOf(boards);
     }
 }

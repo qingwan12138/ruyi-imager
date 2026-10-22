@@ -612,7 +612,7 @@ public final class CliApplication implements Runnable {
                 if (json) {
                     Map<String, Object> output = new LinkedHashMap<>();
                     output.put("type", "image-list");
-                    output.put("images", catalog.images());
+                    output.put("images", imageOutput(catalog.images()));
                     JsonOutput.print(output);
                     return CommandLine.ExitCode.OK;
                 }
@@ -630,6 +630,39 @@ public final class CliApplication implements Runnable {
                 return failException(e, json);
             }
         }
+    }
+
+    /// Converts catalog images to the stable CLI JSON shape.
+    ///
+    /// The catalog keeps extra metadata for the GUI, such as the boards an image declares, but the
+    /// CLI output stays limited to the fields published before multi-board support so consumers of
+    /// `image list --json` keep receiving the same schema.
+    ///
+    /// @param images catalog images.
+    /// @return immutable JSON-ready image maps.
+    private static @Unmodifiable List<@Unmodifiable Map<String, @Nullable Object>> imageOutput(
+            List<ImageEntry> images) {
+        ArrayList<@Unmodifiable Map<String, @Nullable Object>> output = new ArrayList<>(images.size());
+        for (ImageEntry image : images) {
+            Map<String, @Nullable Object> map = new LinkedHashMap<>();
+            map.put("repoId", image.repoId());
+            map.put("category", image.category());
+            map.put("name", image.name());
+            map.put("version", image.version());
+            map.put("slug", image.slug());
+            map.put("atom", image.atom());
+            map.put("displayName", image.displayName());
+            map.put("manufacturer", image.manufacturer());
+            map.put("board", image.board());
+            map.put("variant", image.variant());
+            map.put("strategy", image.strategy());
+            map.put("partitionMap", image.partitionMap());
+            map.put("distfiles", image.distfiles());
+            map.put("support", image.support());
+            map.put("components", image.components());
+            output.add(Collections.unmodifiableMap(map));
+        }
+        return List.copyOf(output);
     }
 
     /// Downloads a Ruyi image.

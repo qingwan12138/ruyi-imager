@@ -30,6 +30,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -559,10 +560,10 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         String name = comboName(comboPath);
         String version = firstPackage.version();
         @Nullable String displayName = combo.getString("display_name");
-        @Nullable DeviceNameParts relatedDevice = readRelatedDeviceName(entity);
-        @Nullable DeviceNameParts parsedDevice = relatedDevice != null
-                ? relatedDevice
-                : parseDeviceName("board-image", firstPackage.name(), deviceIds);
+        @Unmodifiable List<DeviceNameParts> relatedDevices = readRelatedDevices(entity);
+        @Nullable DeviceNameParts parsedDevice = relatedDevices.isEmpty()
+                ? parseDeviceName("board-image", firstPackage.name(), deviceIds)
+                : relatedDevices.getFirst();
         String manufacturer = firstPackage.manufacturer();
         String board = firstPackage.board();
         String variant = firstPackage.variant();
@@ -574,6 +575,9 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 manufacturer = mappedManufacturer;
             }
         }
+        @Unmodifiable List<ImageBoard> boards = relatedDevices.isEmpty()
+                ? List.of(new ImageBoard(manufacturer, board, variant))
+                : relatedBoards(relatedDevices, manufacturer);
 
         String strategy = components.getFirst().strategy();
         StrategySupport support = components.stream()
@@ -596,7 +600,35 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 partitionMap,
                 distfiles,
                 support,
-                components);
+                components,
+                boards);
+    }
+
+    /// Maps related device declarations to image boards.
+    ///
+    /// The first declaration is the image's primary board, so it keeps the image manufacturer when its
+    /// device prefix is unknown; that preserves the single-board behaviour of earlier versions. Any
+    /// further declaration is attributed only through its own device prefix, because sharing a combo
+    /// with the primary board does not prove that it belongs to the same manufacturer. Boards whose
+    /// prefix is unknown are grouped under [#ImageBoard.UNKNOWN_MANUFACTURER] so the GUI can still
+    /// offer them instead of hiding them or guessing a manufacturer.
+    ///
+    /// @param devices related device declarations.
+    /// @param primaryManufacturer manufacturer used for the primary board when its device id is unmapped.
+    /// @return immutable board list.
+    private static @Unmodifiable List<ImageBoard> relatedBoards(
+            @Unmodifiable List<DeviceNameParts> devices,
+            String primaryManufacturer) {
+        ArrayList<ImageBoard> boards = new ArrayList<>(devices.size());
+        for (int index = 0; index < devices.size(); index++) {
+            DeviceNameParts device = devices.get(index);
+            @Nullable String manufacturer = DEVICE_MANUFACTURERS.get(firstFragment(device.deviceId()));
+            if (manufacturer == null) {
+                manufacturer = index == 0 ? primaryManufacturer : ImageBoard.UNKNOWN_MANUFACTURER;
+            }
+            boards.add(new ImageBoard(manufacturer, device.deviceId(), device.variant()));
+        }
+        return List.copyOf(boards);
     }
 
     /// Merges component distfiles while rejecting ambiguous cache file names.
@@ -646,35 +678,51 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         return fileName.endsWith(".toml") ? fileName.substring(0, fileName.length() - ".toml".length()) : fileName;
     }
 
-    /// Reads the related device name from a combo entity.
+    /// Reads the related device declarations from a combo entity.
     ///
     /// @param entity combo entity.
-    /// @return related device name, or null when absent.
-    private static @Nullable DeviceNameParts readRelatedDeviceName(TomlTable entity) {
+    /// @return immutable related device list, empty when absent.
+    private static @Unmodifiable List<DeviceNameParts> readRelatedDevices(TomlTable entity) {
         @Nullable TomlArray related = entity.getArray("related");
         if (related == null) {
-            return null;
+            return List.of();
         }
 
+        ArrayList<DeviceNameParts> devices = new ArrayList<>();
+        LinkedHashSet<String> seen = new LinkedHashSet<>();
         for (int i = 0; i < related.size(); i++) {
             Object value = related.get(i);
             if (!(value instanceof String text)) {
                 continue;
             }
 
-            if (text.startsWith("device-variant:")) {
-                String deviceVariant = text.substring("device-variant:".length());
-                int separator = deviceVariant.indexOf('@');
-                if (separator > 0 && separator < deviceVariant.length() - 1) {
-                    return new DeviceNameParts(
-                            deviceVariant.substring(0, separator),
-                            deviceVariant.substring(separator + 1));
-                }
-            } else if (text.startsWith("device:")) {
-                String device = text.substring("device:".length());
-                if (!device.isBlank()) {
-                    return new DeviceNameParts(device, "generic");
-                }
+            @Nullable DeviceNameParts device = parseRelatedDevice(text);
+            if (device != null && seen.add(device.deviceId() + "@" + device.variant())) {
+                devices.add(device);
+            }
+        }
+        return List.copyOf(devices);
+    }
+
+    /// Parses one related device declaration.
+    ///
+    /// @param text declaration text.
+    /// @return related device, or null when the declaration is not a supported device entry.
+    private static @Nullable DeviceNameParts parseRelatedDevice(String text) {
+        if (text.startsWith("device-variant:")) {
+            String deviceVariant = text.substring("device-variant:".length());
+            int separator = deviceVariant.indexOf('@');
+            if (separator > 0 && separator < deviceVariant.length() - 1) {
+                return new DeviceNameParts(
+                        deviceVariant.substring(0, separator),
+                        deviceVariant.substring(separator + 1));
+            }
+            return null;
+        }
+        if (text.startsWith("device:")) {
+            String device = text.substring("device:".length());
+            if (!device.isBlank()) {
+                return new DeviceNameParts(device, "generic");
             }
         }
         return null;
