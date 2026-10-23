@@ -378,6 +378,21 @@
     -fx-min-width: 640px;
 }
 
+.selection-empty-title {
+    -fx-text-fill: #6b7280;
+    -fx-font-size: 14px;
+}
+
+.selection-empty-hint {
+    -fx-text-fill: #9ca3af;
+    -fx-font-size: 12px;
+}
+
+.selection-required-hint {
+    -fx-text-fill: #9ca3af;
+    -fx-font-size: 12px;
+}
+
 .selection-list-view .mfx-scroll-bar:vertical {
     -fx-padding: 5 0.5 5 0.5;
 }

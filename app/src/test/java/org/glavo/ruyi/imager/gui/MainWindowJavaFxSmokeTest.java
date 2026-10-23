@@ -14,8 +14,12 @@ import io.github.palexdev.materialfx.theming.UserAgentBuilder;
 import javafx.animation.Animation;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.beans.binding.BooleanBinding;
+import javafx.beans.binding.BooleanBinding;
 import javafx.beans.property.ReadOnlyBooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
+import javafx.collections.FXCollections;
+import javafx.collections.FXCollections;
 import javafx.concurrent.Task;
 import javafx.css.PseudoClass;
 import javafx.event.ActionEvent;
@@ -25,6 +29,8 @@ import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.ScrollBar;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListView;
+import javafx.scene.control.ListView;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
@@ -32,6 +38,7 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.paint.LinearGradient;
@@ -286,7 +293,14 @@ public final class MainWindowJavaFxSmokeTest {
                 TreeItem<MainWindow.OperatingSystemTreeNode> category = root.getChildren().getFirst();
                 assertEquals("Ubuntu", category.getValue().name());
 
+                // Filtering must not select anything by itself, and a category is not a choice.
+                assertNull(MainWindow.selectedTreeImage(treeView));
+
                 treeView.getSelectionModel().select(category);
+                assertNull(MainWindow.selectedTreeImage(treeView));
+
+                TreeItem<MainWindow.OperatingSystemTreeNode> imageItem = category.getChildren().getFirst();
+                treeView.getSelectionModel().select(imageItem);
                 @Nullable ImageEntry selected = MainWindow.selectedTreeImage(treeView);
                 assertNotNull(selected);
                 assertEquals(ubuntu.atom(), selected.atom());
@@ -319,6 +333,40 @@ public final class MainWindowJavaFxSmokeTest {
             content.fireEvent(keyPressed(KeyCode.A));
             assertEquals(1, cancels.get());
             assertEquals(1, confirms.get());
+            return null;
+        });
+    }
+
+    /// Verifies that the confirm state follows the current selection of a list and of a tree.
+    ///
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void reportsSelectionConfirmState() throws Exception {
+        runOnJavaFxThread(() -> {
+            ListView<String> listView = new ListView<>();
+            listView.setItems(FXCollections.observableArrayList("alpha", "beta"));
+            BooleanBinding listConfirm = MainWindow.selectionCanConfirm(listView);
+            assertFalse(listConfirm.get());
+
+            listView.getSelectionModel().selectFirst();
+            assertTrue(listConfirm.get());
+
+            listView.getSelectionModel().clearSelection();
+            assertFalse(listConfirm.get());
+
+            TreeView<MainWindow.OperatingSystemTreeNode> treeView = MainWindow.selectionTreeView();
+            BooleanBinding treeConfirm = MainWindow.selectionCanConfirm(treeView);
+            assertFalse(treeConfirm.get());
+
+            MainWindow.operatingSystemSelectionContent("Choose OS", treeView, manyImages(), null);
+            assertFalse(treeConfirm.get());
+
+            TreeItem<MainWindow.OperatingSystemTreeNode> category = treeView.getRoot().getChildren().getFirst();
+            treeView.getSelectionModel().select(category);
+            assertFalse(treeConfirm.get());
+
+            treeView.getSelectionModel().select(category.getChildren().getFirst());
+            assertTrue(treeConfirm.get());
             return null;
         });
     }
@@ -365,6 +413,94 @@ public final class MainWindowJavaFxSmokeTest {
 
             content.fireEvent(keyPressed(KeyCode.ENTER));
             assertEquals(1, confirms.get());
+            return null;
+        });
+    }
+
+    /// Verifies that a selection dialog asks for a choice until a confirmable item is selected.
+    ///
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void showsSelectionRequiredHintUntilAnItemIsChosen() throws Exception {
+        runOnJavaFxThread(() -> {
+            Locale originalLocale = Messages.locale();
+            Messages.setLocale(Locale.ENGLISH);
+            try {
+                TreeView<MainWindow.OperatingSystemTreeNode> treeView = MainWindow.selectionTreeView();
+                Node content = MainWindow.operatingSystemSelectionContent(
+                        "Choose OS",
+                        treeView,
+                        manyImages(),
+                        null);
+                VBox contentBox = assertInstanceOf(VBox.class, content);
+                assertEquals(3, contentBox.getChildren().size());
+                Label hint = assertInstanceOf(Label.class, contentBox.getChildren().get(2));
+                assertTrue(hint.isVisible());
+
+                TreeItem<MainWindow.OperatingSystemTreeNode> category = treeView.getRoot().getChildren().getFirst();
+                treeView.getSelectionModel().select(category.getChildren().getFirst());
+                assertFalse(hint.isVisible());
+
+                treeView.getSelectionModel().clearSelection();
+                assertTrue(hint.isVisible());
+
+                HBox headerRow = assertInstanceOf(HBox.class, contentBox.getChildren().get(0));
+                TextField searchField = assertInstanceOf(
+                        TextField.class,
+                        headerRow.getChildren().get(headerRow.getChildren().size() - 1));
+                searchField.setText("no-such-image");
+                assertFalse(hint.isVisible());
+            } finally {
+                Messages.setLocale(originalLocale);
+            }
+            return null;
+        });
+    }
+
+    /// Verifies that a selection dialog reports an empty state and cannot be confirmed without items.
+    ///
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void reportsEmptySelectionStateWhenSearchMatchesNothing() throws Exception {
+        runOnJavaFxThread(() -> {
+            Locale originalLocale = Messages.locale();
+            Messages.setLocale(Locale.ENGLISH);
+            try {
+                ImageEntry revyos = image(
+                        "revyos-test",
+                        "RevyOS image for Test Board",
+                        "generic",
+                        "dd-v1",
+                        Map.of("disk", "revyos.raw"));
+
+                TreeView<MainWindow.OperatingSystemTreeNode> treeView = MainWindow.selectionTreeView();
+                Node content = MainWindow.operatingSystemSelectionContent(
+                        "Choose OS",
+                        treeView,
+                        List.of(revyos),
+                        revyos);
+                VBox contentBox = assertInstanceOf(VBox.class, content);
+
+                HBox headerRow = assertInstanceOf(HBox.class, contentBox.getChildren().get(0));
+                TextField searchField = assertInstanceOf(
+                        TextField.class,
+                        headerRow.getChildren().get(headerRow.getChildren().size() - 1));
+                StackPane selectionArea = assertInstanceOf(StackPane.class, contentBox.getChildren().get(1));
+                assertEquals(2, selectionArea.getChildren().size());
+                VBox emptyHint = assertInstanceOf(VBox.class, selectionArea.getChildren().get(1));
+
+                BooleanBinding canConfirm = MainWindow.selectionCanConfirm(treeView);
+                assertTrue(canConfirm.get());
+                assertFalse(emptyHint.isVisible());
+
+                searchField.setText("no-such-image");
+
+                assertNull(MainWindow.selectedTreeImage(treeView));
+                assertFalse(canConfirm.get());
+                assertTrue(emptyHint.isVisible());
+            } finally {
+                Messages.setLocale(originalLocale);
+            }
             return null;
         });
     }
