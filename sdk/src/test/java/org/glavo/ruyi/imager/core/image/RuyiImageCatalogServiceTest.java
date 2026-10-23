@@ -3,6 +3,8 @@
 
 package org.glavo.ruyi.imager.core.image;
 
+import jdk.jfr.Recording;
+import jdk.jfr.consumer.RecordingFile;
 import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.repo.RuyiRepositoryStore;
@@ -16,6 +18,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.ArrayList;
@@ -131,6 +134,139 @@ public final class RuyiImageCatalogServiceTest {
         String instructions = fetchRestriction.render(Path.of("downloads").resolve("manual.raw"), Locale.ENGLISH);
         assertTrue(instructions.contains("manual.raw"), instructions);
         assertTrue(instructions.contains("manual"), instructions);
+    }
+
+    /// Checks message-file I/O per catalog rebuild without relying on timing thresholds.
+    ///
+    /// @param directory isolated test directory.
+    /// @throws Exception when fixture metadata or the recording cannot be read or written.
+    @Test
+    public void readsRepositoryMessagesOncePerCatalogLoad(@TempDir Path directory) throws Exception {
+        Path config = Files.createDirectories(directory.resolve("config"));
+        Path repo = directory.resolve("repo");
+        writeConfig(config, repo);
+        writeRepositoryConfig(repo);
+        writeFetchRestrictedImageManifest(repo);
+        Path packageDirectory = repo.resolve("packages/board-image/manual-milkv-meles");
+        Files.copy(packageDirectory.resolve("1.2.3.toml"), packageDirectory.resolve("1.2.4.toml"));
+        AppDirectories directories = new AppDirectories(config, directory.resolve("cache"));
+        RuyiImageCatalogService service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        Path recording = directory.resolve("catalog.jfr");
+        Path messages = repo.resolve("messages.toml").toAbsolutePath();
+        long messageBytes = Files.size(messages);
+        try (Recording events = new Recording()) {
+            events.enable("jdk.FileRead").withThreshold(Duration.ZERO).withoutStackTrace();
+            events.start();
+            ImageCatalog catalog = service.listImages();
+            assertEquals(2, catalog.images().size());
+            assertSame(catalog, service.listImages());
+            service.invalidateCache();
+            assertEquals(2, service.listImages().images().size());
+            events.stop();
+            events.dump(recording);
+        }
+        long bytesRead = RecordingFile.readAllEvents(recording).stream()
+                .filter(event -> event.getEventType().getName().equals("jdk.FileRead"))
+                .filter(event -> Path.of(event.getString("path")).toAbsolutePath().equals(messages))
+                .mapToLong(event -> event.getLong("bytesRead"))
+                .sum();
+        assertEquals(2 * messageBytes, bytesRead, "Each catalog rebuild must read the message file only once");
+    }
+
+    /// Refreshes repository message snapshots only when the catalog is invalidated.
+    ///
+    /// @param initialState initial message-file state.
+    /// @param directory isolated test directory.
+    /// @throws Exception when fixture metadata cannot be written or parsed.
+    @ParameterizedTest
+    @ValueSource(strings = {"valid", "missing", "malformed", "unsupported"})
+    public void refreshesRepositoryMessagesWithCatalog(String initialState, @TempDir Path directory) throws Exception {
+        Path config = Files.createDirectories(directory.resolve("config"));
+        Path repo = directory.resolve("repo");
+        writeConfig(config, repo);
+        writeRepositoryConfig(repo);
+        writeFetchRestrictedImageManifest(repo);
+        Path packageDirectory = repo.resolve("packages/board-image/manual-milkv-meles");
+        Files.copy(packageDirectory.resolve("1.2.3.toml"), packageDirectory.resolve("1.2.4.toml"));
+        Path messages = repo.resolve("messages.toml");
+        switch (initialState) {
+            case "missing" -> Files.delete(messages);
+            case "malformed" -> Files.writeString(messages, "invalid = [");
+            case "unsupported" -> Files.writeString(messages, "ruyi-repo-messages = 'v2'");
+            default -> { }
+        }
+        AppDirectories directories = new AppDirectories(config, directory.resolve("cache"));
+        RuyiImageCatalogService service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        ImageCatalog first = service.listImages();
+        assertEquals(2, first.images().size());
+        for (ImageEntry image : first.images()) {
+            RuyiDistfile distfile = image.distfiles().getFirst();
+            assertTrue(distfile.fetchRestricted());
+            if (initialState.equals("valid")) {
+                assertNotNull(distfile.fetchRestriction());
+                assertEquals("Fetch this image manually to {{ dest_path }}.",
+                        distfile.fetchRestriction().templates().get("en_US"));
+            } else {
+                assertNull(distfile.fetchRestriction());
+            }
+        }
+        Files.writeString(messages, """
+                ruyi-repo-messages = "v1"
+                ["manual/image"]
+                en_US = "Updated instructions for {{ dest_path }}"
+                """);
+        assertSame(first, service.listImages());
+        service.invalidateCache();
+        ImageCatalog refreshed = service.listImages();
+        assertEquals(2, refreshed.images().size());
+        for (ImageEntry image : refreshed.images()) {
+            @Nullable RuyiFetchRestriction restriction = image.distfiles().getFirst().fetchRestriction();
+            assertNotNull(restriction);
+            assertEquals("Updated instructions for {{ dest_path }}", restriction.templates().get("en_US"));
+            assertTrue(restriction.render(Path.of("manual.raw"), Locale.ENGLISH).contains("manual.raw"));
+        }
+        if (initialState.equals("valid")) {
+            assertEquals("Fetch this image manually to {{ dest_path }}.",
+                    first.images().getFirst().distfiles().getFirst().fetchRestriction().templates().get("en_US"));
+        }
+    }
+
+    /// Keeps identical message identifiers scoped to their own repository.
+    ///
+    /// @param directory isolated test directory.
+    /// @throws Exception when fixture metadata cannot be written or parsed.
+    @Test
+    public void isolatesRepositoryMessageTemplates(@TempDir Path directory) throws Exception {
+        Path config = Files.createDirectories(directory.resolve("config"));
+        for (String id : List.of("ruyisdk", "overlay")) {
+            Path repo = directory.resolve(id);
+            writeRepositoryConfig(repo);
+            writeFetchRestrictedImageManifest(repo);
+            Files.move(repo.resolve("packages/board-image/manual-milkv-meles"),
+                    repo.resolve("packages/board-image/" + id + "-milkv-meles"));
+            Files.writeString(repo.resolve("messages.toml"), """
+                    ruyi-repo-messages = "v1"
+                    ["manual/image"]
+                    en_US = "%s instructions"
+                    """.formatted(id));
+        }
+        Files.writeString(config.resolve("config.toml"), """
+                [repo]
+                local = "%s"
+                [[repos]]
+                id = "overlay"
+                local = "%s"
+                """.formatted(directory.resolve("ruyisdk").toString().replace('\\', '/'),
+                directory.resolve("overlay").toString().replace('\\', '/')));
+        AppDirectories directories = new AppDirectories(config, directory.resolve("cache"));
+        RuyiImageCatalogService service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        ImageCatalog catalog = service.listImages();
+        assertEquals(2, catalog.images().size());
+        for (ImageEntry image : catalog.images()) {
+            @Nullable RuyiFetchRestriction restriction = image.distfiles().getFirst().fetchRestriction();
+            assertNotNull(restriction);
+            assertEquals(image.repoId() + " instructions", restriction.templates().get("en_US"));
+        }
     }
 
     /// Verifies Ruyi atom matching and latest stable version selection.

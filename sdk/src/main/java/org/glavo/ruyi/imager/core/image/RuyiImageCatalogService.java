@@ -315,6 +315,8 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         }
 
         @Unmodifiable List<String> deviceIds = readDeviceIds(metadata.root());
+        @Unmodifiable Map<String, @Unmodifiable Map<String, String>> repoMessages =
+                readRepoMessages(metadata.root().resolve("messages.toml"));
         LOGGER.atInfo().log(() -> "Reading repository images. repo="
                 + metadata.id()
                 + ", packageRoot="
@@ -324,7 +326,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         ArrayList<ImageEntry> result = new ArrayList<>();
         try (var categories = Files.newDirectoryStream(packageRoot, Files::isDirectory)) {
             for (Path categoryPath : categories) {
-                readCategory(metadata, categoryPath, deviceIds, result);
+                readCategory(metadata, categoryPath, deviceIds, repoMessages, result);
             }
         }
         @Unmodifiable List<ImageEntry> packageImages = List.copyOf(result);
@@ -410,17 +412,19 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     /// @param metadata repository metadata.
     /// @param categoryPath category path.
     /// @param deviceIds known device ids.
+    /// @param repoMessages message templates shared by this repository load.
     /// @param result mutable output list.
     /// @throws IOException when manifests cannot be read.
     private static void readCategory(
             RuyiRepositoryMetadata metadata,
             Path categoryPath,
             @Unmodifiable List<String> deviceIds,
+            @Unmodifiable Map<String, @Unmodifiable Map<String, String>> repoMessages,
             ArrayList<ImageEntry> result) throws IOException {
         String category = categoryPath.getFileName().toString();
         try (var packages = Files.newDirectoryStream(categoryPath, Files::isDirectory)) {
             for (Path packagePath : packages) {
-                readPackage(metadata, category, packagePath, deviceIds, result);
+                readPackage(metadata, category, packagePath, deviceIds, repoMessages, result);
             }
         }
     }
@@ -431,6 +435,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     /// @param category package category.
     /// @param packagePath package path.
     /// @param deviceIds known device ids.
+    /// @param repoMessages message templates shared by this repository load.
     /// @param result mutable output list.
     /// @throws IOException when manifests cannot be read.
     private static void readPackage(
@@ -438,6 +443,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
             String category,
             Path packagePath,
             @Unmodifiable List<String> deviceIds,
+            @Unmodifiable Map<String, @Unmodifiable Map<String, String>> repoMessages,
             ArrayList<ImageEntry> result) throws IOException {
         String name = packagePath.getFileName().toString();
         try (var versions = Files.newDirectoryStream(packagePath, "*.toml")) {
@@ -448,7 +454,8 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 }
 
                 String version = fileName.substring(0, fileName.length() - ".toml".length());
-                @Nullable ImageEntry image = readImageManifest(metadata, category, name, version, manifestPath, deviceIds);
+                @Nullable ImageEntry image = readImageManifest(
+                        metadata, category, name, version, manifestPath, deviceIds, repoMessages);
                 if (image != null) {
                     result.add(image);
                 }
@@ -685,6 +692,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     /// @param version package version.
     /// @param manifestPath manifest path.
     /// @param deviceIds known device ids.
+    /// @param repoMessages message templates shared by this repository load.
     /// @return image entry, or null when the package is not provisionable.
     /// @throws IOException when the manifest cannot be parsed.
     private static @Nullable ImageEntry readImageManifest(
@@ -693,7 +701,8 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
             String name,
             String version,
             Path manifestPath,
-            @Unmodifiable List<String> deviceIds) throws IOException {
+            @Unmodifiable List<String> deviceIds,
+            @Unmodifiable Map<String, @Unmodifiable Map<String, String>> repoMessages) throws IOException {
         TomlParseResult manifest = parseToml(manifestPath);
         @Nullable TomlTable provisionable = manifest.getTable("provisionable");
         if (provisionable == null || !hasProvisionableKind(manifest)) {
@@ -711,7 +720,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         }
 
         @Unmodifiable Map<String, String> partitionMap = readStringMap(partitionMapTable);
-        @Unmodifiable List<RuyiDistfile> distfiles = readDistfiles(metadata, manifest);
+        @Unmodifiable List<RuyiDistfile> distfiles = readDistfiles(metadata, manifest, repoMessages);
         @Nullable String slug = readSlug(manifest);
         String displayName = readDisplayName(manifest, category, name, version);
         @Nullable DeviceNameParts deviceName = parseDeviceName(category, name, deviceIds);
@@ -758,17 +767,17 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     ///
     /// @param metadata repository metadata.
     /// @param manifest package manifest.
+    /// @param repoMessages message templates shared by this repository load.
     /// @return immutable distfile list.
     private static @Unmodifiable List<RuyiDistfile> readDistfiles(
             RuyiRepositoryMetadata metadata,
-            TomlTable manifest) {
+            TomlTable manifest,
+            @Unmodifiable Map<String, @Unmodifiable Map<String, String>> repoMessages) {
         @Nullable TomlArray array = manifest.getArray("distfiles");
         if (array == null) {
             return List.of();
         }
 
-        @Unmodifiable Map<String, @Unmodifiable Map<String, String>> repoMessages =
-                readRepoMessages(metadata.root().resolve("messages.toml"));
         ArrayList<RuyiDistfile> result = new ArrayList<>();
         for (int i = 0; i < array.size(); i++) {
             Object value = array.get(i);
