@@ -31,21 +31,31 @@ import org.glavo.ruyi.imager.logging.RuyiLogging;
 import org.glavo.ruyi.imager.update.BuildInfo;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Unmodifiable;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -474,6 +484,133 @@ public final class CliApplicationTest {
         assertTrue(complete.path("success").asBoolean());
         assertEquals(artifact.toString(), complete.path("path").asText());
         assertArrayEquals(imageBytes, Files.readAllBytes(artifact));
+    }
+
+    /// Verifies that JSON output stays UTF-8 even when the console uses a legacy code page.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be written or JSON cannot be parsed.
+    @Test
+    public void imageListJsonWritesUtf8RegardlessOfConsoleCharset(@TempDir Path temporaryDirectory) throws Exception {
+        RuyiFixture fixture = createRuyiFixture(
+                temporaryDirectory,
+                "revyos-sipeed-lpi4a",
+                "如意镜像 for Sipeed LicheePi 4A",
+                "revyos-lpi4a",
+                "image.raw",
+                "dd-v1",
+                imageBytes(32),
+                new FixedBlockDeviceService(List.of()));
+
+        byte[] captured = runCliCapturingBytes(fixture.services(), "ISO-8859-1", List.of("image", "list", "--json"));
+
+        JsonNode root = MAPPER.readTree(new String(captured, StandardCharsets.UTF_8));
+        assertEquals("image-list", root.path("type").asText());
+        assertEquals("如意镜像 for Sipeed LicheePi 4A", root.path("images").path(0).path("displayName").asText());
+    }
+
+    /// Verifies that usage output follows the charset of the standard streams.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void helpOutputFollowsConsoleCharset(@TempDir Path temporaryDirectory) throws Exception {
+        Assumptions.assumeTrue(Charset.isSupported("GBK"));
+        RuyiFixture fixture = createRuyiFixture(
+                temporaryDirectory,
+                "revyos-sipeed-lpi4a",
+                "RevyOS image for Sipeed LicheePi 4A",
+                "revyos-lpi4a",
+                "image.raw",
+                "dd-v1",
+                imageBytes(32),
+                new FixedBlockDeviceService(List.of()));
+
+        byte[] captured = runCliCapturingBytes(fixture.services(), "GBK", List.of("--help"));
+
+        String help = new String(captured, Charset.forName("GBK"));
+        assertTrue(help.contains("通过 CLI 或 GUI 刷写 Ruyi 镜像"), help);
+    }
+
+    /// Runs the CLI with Chinese messages and a custom standard-output charset.
+    ///
+    /// @param services application services.
+    /// @param charsetName standard-output charset name.
+    /// @param args command arguments.
+    /// @return captured standard output bytes.
+    /// @throws Exception when the streams cannot be replaced.
+    private static byte @Unmodifiable [] runCliCapturingBytes(
+            AppServices services,
+            String charsetName,
+            List<String> args) throws Exception {
+        PrintStream originalOut = System.out;
+        PrintStream originalErr = System.err;
+        Locale originalLocale = Messages.locale();
+        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+        try (PrintStream capturedOut = new PrintStream(stdout, true, charsetName);
+             PrintStream capturedErr = new PrintStream(new ByteArrayOutputStream(), true, charsetName)) {
+            System.setOut(capturedOut);
+            System.setErr(capturedErr);
+            Messages.setLocale("zh");
+            CliApplication.run(services, args.toArray(String[]::new));
+            capturedOut.flush();
+        } finally {
+            System.setOut(originalOut);
+            System.setErr(originalErr);
+            Messages.setLocale(originalLocale);
+        }
+        return stdout.toByteArray();
+    }
+
+    /// Verifies that concurrent JSON events are written as separate, parseable lines.
+    ///
+    /// @throws Exception when the writer threads cannot run.
+    @Test
+    public void concurrentJsonEventsStayOnSeparateLines() throws Exception {
+        int threads = 8;
+        int eventsPerThread = 250;
+        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+        PrintStream originalOut = System.out;
+        try (PrintStream captured = new PrintStream(stdout, true, StandardCharsets.UTF_8)) {
+            System.setOut(captured);
+            ExecutorService executor = Executors.newFixedThreadPool(threads);
+            CountDownLatch start = new CountDownLatch(1);
+            ArrayList<Future<?>> futures = new ArrayList<>(threads);
+            try {
+                for (int thread = 0; thread < threads; thread++) {
+                    int threadIndex = thread;
+                    futures.add(executor.submit(() -> {
+                        start.await();
+                        for (int event = 0; event < eventsPerThread; event++) {
+                            Map<String, Object> payload = new LinkedHashMap<>();
+                            payload.put("type", "progress");
+                            payload.put("stage", "download");
+                            payload.put("message", "事件 " + threadIndex + "-" + event);
+                            CliApplication.JsonOutput.print(payload);
+                        }
+                        return null;
+                    }));
+                }
+                start.countDown();
+                for (Future<?> future : futures) {
+                    future.get();
+                }
+            } finally {
+                executor.shutdownNow();
+            }
+        } finally {
+            System.setOut(originalOut);
+        }
+
+        String[] lines = stdout.toString(StandardCharsets.UTF_8).strip().split("\\R");
+        assertEquals(threads * eventsPerThread, lines.length);
+        Set<String> messages = new HashSet<>();
+        for (String line : lines) {
+            JsonNode event = MAPPER.readTree(line);
+            assertEquals("progress", event.path("type").asText());
+            messages.add(event.path("message").asText());
+        }
+        assertEquals(threads * eventsPerThread, messages.size());
     }
 
     /// Reports unsupported provision strategies through the public CLI without writing to the target.

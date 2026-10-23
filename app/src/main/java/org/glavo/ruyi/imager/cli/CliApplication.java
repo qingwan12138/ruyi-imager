@@ -40,8 +40,11 @@ import picocli.CommandLine.ScopeType;
 import picocli.CommandLine.Spec;
 
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.PrintStream;
+import java.io.PrintWriter;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -137,11 +140,39 @@ public final class CliApplication implements Runnable {
                 commandLine.addSubcommand("check-update", new CheckUpdateCommand(services));
             }
             localizeCommands(commandLine);
+            configureOutput(commandLine);
             int exitCode = commandLine.execute(args);
             LOGGER.atInfo().log(() -> "CLI command finished. exitCode=" + exitCode);
             return exitCode;
         } finally {
             RuyiLogging.shutdown();
+        }
+    }
+
+    /// Aligns Picocli usage output with the charset used by the standard streams.
+    ///
+    /// Picocli resolves the `sun.stdout.encoding` property, which current JDKs no longer provide, and
+    /// falls back to the default charset; the application itself writes through `System.out`, whose
+    /// charset follows the console. Routing usage output through the stream charset keeps a single
+    /// encoding, so help text and command messages stay readable on legacy Windows code pages.
+    ///
+    /// @param commandLine root command line.
+    private static void configureOutput(CommandLine commandLine) {
+        PrintWriter out = new PrintWriter(new OutputStreamWriter(System.out, System.out.charset()), true);
+        PrintWriter err = new PrintWriter(new OutputStreamWriter(System.err, System.err.charset()), true);
+        applyWriters(commandLine, out, err);
+    }
+
+    /// Applies output writers to a command line and every nested subcommand.
+    ///
+    /// @param commandLine command line.
+    /// @param out standard output writer.
+    /// @param err standard error writer.
+    private static void applyWriters(CommandLine commandLine, PrintWriter out, PrintWriter err) {
+        commandLine.setOut(out);
+        commandLine.setErr(err);
+        for (CommandLine subcommand : commandLine.getSubcommands().values()) {
+            applyWriters(subcommand, out, err);
         }
     }
 
@@ -187,7 +218,8 @@ public final class CliApplication implements Runnable {
     /// @param spec command specification.
     private static void printUsage(@Nullable CommandSpec spec) {
         if (spec != null) {
-            spec.commandLine().usage(System.out);
+            CommandLine commandLine = spec.commandLine();
+            commandLine.usage(commandLine.getOut());
         }
     }
 
@@ -1034,22 +1066,43 @@ public final class CliApplication implements Runnable {
 
     /// JSON writer used by command output paths.
     @NotNullByDefault
-    private static final class JsonOutput {
+    static final class JsonOutput {
         /// Shared JSON mapper.
         private static final ObjectMapper MAPPER = new ObjectMapper();
+
+        /// Guards the standard output while one complete JSON line is written.
+        private static final Object LOCK = new Object();
 
         /// Prevents construction of the JSON utility.
         private JsonOutput() {
         }
 
-        /// Writes one JSON object followed by a newline.
+        /// Writes one JSON object followed by a line separator.
+        ///
+        /// The text is encoded as UTF-8 while it is written, so machine-readable output does not
+        /// depend on the console code page of the host and no full-size byte copy is allocated. The
+        /// complete line is written under a lock because progress events are reported from several
+        /// threads, for example the ones draining fastboot or helper output.
         ///
         /// @param value value to write.
-        private static void print(Object value) {
+        static void print(Object value) {
             try {
-                System.out.println(MAPPER.writeValueAsString(value));
+                writeLine(MAPPER.writeValueAsString(value));
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
+            }
+        }
+
+        /// Writes one complete JSON line to the standard output.
+        ///
+        /// @param json JSON text.
+        /// @throws IOException when the text cannot be written.
+        private static void writeLine(String json) throws IOException {
+            synchronized (LOCK) {
+                OutputStreamWriter writer = new OutputStreamWriter(System.out, StandardCharsets.UTF_8);
+                writer.write(json);
+                writer.write(System.lineSeparator());
+                writer.flush();
             }
         }
     }
