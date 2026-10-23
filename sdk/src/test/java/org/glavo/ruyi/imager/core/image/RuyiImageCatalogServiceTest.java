@@ -18,11 +18,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 /// Tests for Ruyi image catalog parsing.
 @NotNullByDefault
@@ -57,9 +61,7 @@ public final class RuyiImageCatalogServiceTest {
         assertEquals("revyos-meles", image.slug());
         assertEquals("board-image/revyos-milkv-meles(1.2.3)", image.atom());
         assertEquals("RevyOS image for Milk-V Meles", image.displayName());
-        assertEquals("Milk-V", image.manufacturer());
-        assertEquals("milkv-meles", image.board());
-        assertEquals("generic", image.variant());
+        assertEquals(List.of(new ImageTarget("Milk-V", "milkv-meles", "generic")), image.targets());
         assertEquals("dd-v1", image.strategy());
         assertEquals(StrategySupport.SUPPORTED, image.support());
         assertEquals("image.raw", image.partitionMap().get("disk"));
@@ -289,9 +291,7 @@ public final class RuyiImageCatalogServiceTest {
         assertEquals("0.20251226.0", combo.version());
         assertEquals("image-combo/revyos-sipeed-lpi4a@8g(0.20251226.0)", combo.atom());
         assertEquals("RevyOS for Sipeed LicheePi 4A (8G RAM)", combo.displayName());
-        assertEquals("Sipeed", combo.manufacturer());
-        assertEquals("sipeed-lpi4a", combo.board());
-        assertEquals("8g", combo.variant());
+        assertEquals(List.of(new ImageTarget("Sipeed", "sipeed-lpi4a", "8g")), combo.targets());
         assertEquals("fastboot-v1(lpi4a-uboot)", combo.strategy());
         assertEquals(systemStrategy.equals("fastboot-v1") ? StrategySupport.SUPPORTED : StrategySupport.UNKNOWN,
                 combo.support());
@@ -448,9 +448,7 @@ public final class RuyiImageCatalogServiceTest {
         @Nullable ImageEntry image = service.findImage("uboot-revyos-milkv-meles-4g");
 
         assertNotNull(image);
-        assertEquals("Milk-V", image.manufacturer());
-        assertEquals("milkv-meles", image.board());
-        assertEquals("4g", image.variant());
+        assertEquals(List.of(new ImageTarget("Milk-V", "milkv-meles", "4g")), image.targets());
     }
 
     /// Verifies board-image board names use device entities before suffix heuristics.
@@ -483,9 +481,7 @@ public final class RuyiImageCatalogServiceTest {
         @Nullable ImageEntry image = service.findImage("revyos-sipeed-lpi4a-headless");
 
         assertNotNull(image);
-        assertEquals("Sipeed", image.manufacturer());
-        assertEquals("sipeed-lpi4a", image.board());
-        assertEquals("headless", image.variant());
+        assertEquals(List.of(new ImageTarget("Sipeed", "sipeed-lpi4a", "headless")), image.targets());
     }
 
 
@@ -534,6 +530,86 @@ public final class RuyiImageCatalogServiceTest {
         assertEquals(ImageCacheStatus.State.COMPLETE, completeStatus.state());
         assertEquals(1, completeStatus.cachedDistfiles());
         assertEquals(1024L, completeStatus.cachedBytes());
+    }
+
+    /// Retains every related board and variant without duplicating combo identities.
+    ///
+    /// @param reverse whether to reverse the relation order.
+    /// @param directory isolated test directory.
+    /// @throws Exception when fixture metadata cannot be written or parsed.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void retainsAllComboTargets(boolean reverse, @TempDir Path directory) throws Exception {
+        Path config = Files.createDirectories(directory.resolve("config"));
+        Path repo = directory.resolve("repo");
+        writeConfig(config, repo);
+        writeRepositoryConfig(repo);
+        writeDeviceEntity(repo, "awol-d1dev");
+        writeDeviceEntity(repo, "sipeed-licheerv");
+        List<String> related = new ArrayList<>(List.of(
+                "device-variant:awol-d1dev@generic", "device-variant:sipeed-licheerv@generic",
+                "device:sipeed-licheerv", "device-variant:sipeed-licheerv@alternate",
+                "device-variant:sipeed-licheerv@generic", "cpu:allwinner-d1",
+                "device-variant:invalid@", "device:"));
+        if (reverse) {
+            Collections.reverse(related);
+        }
+        Path combos = Files.createDirectories(repo.resolve("entities/image-combo"));
+        for (String edition : List.of("base", "xfce")) {
+            String name = "oerv-awol-d1-" + edition;
+            writeImageManifest(repo, name, "1.0.0", "openEuler D1", name, edition + ".img", "dd-v1", "PLCT");
+            Files.writeString(combos.resolve(name + ".toml"), """
+                    related = ["%s"]
+                    [image-combo]
+                    display_name = "openEuler D1"
+                    package_atoms = ["board-image/%s"]
+                    """.formatted(String.join("\", \"", related), name));
+        }
+        AppDirectories directories = new AppDirectories(config, directory.resolve("cache"));
+        RuyiImageCatalogService service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        ImageCatalog catalog = service.listImages();
+        assertEquals(4, catalog.images().size());
+        for (String edition : List.of("base", "xfce")) {
+            String atom = "image-combo/oerv-awol-d1-" + edition;
+            @Nullable ImageEntry combo = service.findImage(atom);
+            assertNotNull(combo);
+            assertEquals(3, combo.targets().size());
+            assertEquals(Set.of(new ImageTarget("Allwinner", "awol-d1dev", "generic"),
+                    new ImageTarget("Sipeed", "sipeed-licheerv", "generic"),
+                    new ImageTarget("Sipeed", "sipeed-licheerv", "alternate")), Set.copyOf(combo.targets()));
+            assertEquals(1, catalog.images().stream().filter(image -> image.atom().equals(combo.atom())).count());
+            assertSame(combo, service.findImage(combo.atom()));
+            @Nullable ImageEntry source = service.findImage("board-image/oerv-awol-d1-" + edition);
+            assertNotNull(source);
+            assertEquals(source.partitionMap(), combo.partitionMap());
+            assertEquals(source.components(), combo.components());
+            assertEquals(source.distfiles(), combo.distfiles());
+        }
+    }
+
+    /// Preserves package-derived targets when a combo has no usable device relations.
+    ///
+    /// @param relation TOML declaration for absent, empty, or unrelated associations.
+    /// @param directory isolated test directory.
+    /// @throws Exception when fixture metadata cannot be written or parsed.
+    @ParameterizedTest
+    @ValueSource(strings = {"", "related = []", "related = ['cpu:allwinner-d1', 'device-variant:invalid@', 'device:']"})
+    public void fallsBackWhenComboHasNoTargets(String relation, @TempDir Path directory) throws Exception {
+        Path config = Files.createDirectories(directory.resolve("config"));
+        Path repo = directory.resolve("repo");
+        writeConfig(config, repo);
+        writeRepository(repo);
+        Path combos = Files.createDirectories(repo.resolve("entities/image-combo"));
+        Files.writeString(combos.resolve("meles.toml"), relation + """
+
+                [image-combo]
+                package_atoms = ["board-image/revyos-milkv-meles"]
+                """);
+        AppDirectories directories = new AppDirectories(config, directory.resolve("cache"));
+        RuyiImageCatalogService service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        @Nullable ImageEntry combo = service.findImage("image-combo/meles");
+        assertNotNull(combo);
+        assertEquals(List.of(new ImageTarget("Milk-V", "milkv-meles", "generic")), combo.targets());
     }
 
     /// Writes the application config fixture.

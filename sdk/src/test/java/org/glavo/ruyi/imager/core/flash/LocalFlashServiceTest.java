@@ -16,6 +16,7 @@ import org.glavo.ruyi.imager.core.image.ImageCatalog;
 import org.glavo.ruyi.imager.core.image.ImageCatalogService;
 import org.glavo.ruyi.imager.core.image.ImageComponent;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
+import org.glavo.ruyi.imager.core.image.ImageTarget;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
@@ -573,9 +574,7 @@ public final class LocalFlashServiceTest {
                 null,
                 "image-combo/revyos-sipeed-lpi4a@8g(0.20251226.0)",
                 "RevyOS for Sipeed LicheePi 4A (8G RAM)",
-                "Sipeed",
-                "sipeed-lpi4a",
-                "8g",
+                List.of(new ImageTarget("Sipeed", "sipeed-lpi4a", "8g")),
                 "fastboot-v1(lpi4a-uboot)",
                 combinedPartitions,
                 List.of(),
@@ -654,7 +653,7 @@ public final class LocalFlashServiceTest {
         combined.putAll(secondPartitions);
         ImageEntry image = new ImageEntry(
                 "ruyisdk", "image-combo", "test-combo", "1.0.0", null,
-                "image-combo/test-combo(1.0.0)", "Test combo", "Test", "test", "default",
+                "image-combo/test-combo(1.0.0)", "Test combo", List.of(new ImageTarget("Test", "test", "default")),
                 firstStrategy, combined, List.of(), StrategySupport.SUPPORTED,
                 List.of(
                         new ImageComponent("board-image", "first", "1.0.0", "board-image/first(1.0.0)",

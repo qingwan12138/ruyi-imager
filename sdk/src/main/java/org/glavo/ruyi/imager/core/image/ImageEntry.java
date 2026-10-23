@@ -22,9 +22,7 @@ import java.util.Map;
 /// @param slug deprecated Ruyi package slug when present.
 /// @param atom exact Ruyi atom name.
 /// @param displayName human-readable image name.
-/// @param manufacturer device or image manufacturer name.
-/// @param board target board name.
-/// @param variant board or image variant name.
+/// @param targets nonempty list of associated targets; duplicates are removed in encounter order.
 /// @param strategy Ruyi provisioning strategy name.
 /// @param partitionMap image partition map.
 /// @param distfiles distfiles required by the image.
@@ -39,9 +37,7 @@ public record ImageEntry(
         @Nullable String slug,
         String atom,
         String displayName,
-        String manufacturer,
-        String board,
-        String variant,
+        @Unmodifiable List<ImageTarget> targets,
         String strategy,
         @Unmodifiable Map<String, String> partitionMap,
         @Unmodifiable List<RuyiDistfile> distfiles,
@@ -86,9 +82,7 @@ public record ImageEntry(
                 slug,
                 atom,
                 displayName,
-                manufacturer,
-                board,
-                variant,
+                List.of(new ImageTarget(manufacturer, board, variant)),
                 strategy,
                 partitionMap,
                 distfiles,
@@ -97,7 +91,13 @@ public record ImageEntry(
     }
 
     /// Copies collections into immutable instances.
+    ///
+    /// @throws IllegalArgumentException when no target is supplied.
     public ImageEntry {
+        targets = List.copyOf(targets).stream().distinct().toList();
+        if (targets.isEmpty()) {
+            throw new IllegalArgumentException("An image must have at least one target");
+        }
         partitionMap = Collections.unmodifiableMap(new LinkedHashMap<>(partitionMap));
         distfiles = List.copyOf(distfiles);
         components = List.copyOf(components);

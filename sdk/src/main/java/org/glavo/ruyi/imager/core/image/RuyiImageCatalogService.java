@@ -559,20 +559,18 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         String name = comboName(comboPath);
         String version = firstPackage.version();
         @Nullable String displayName = combo.getString("display_name");
-        @Nullable DeviceNameParts relatedDevice = readRelatedDeviceName(entity);
-        @Nullable DeviceNameParts parsedDevice = relatedDevice != null
-                ? relatedDevice
-                : parseDeviceName("board-image", firstPackage.name(), deviceIds);
-        String manufacturer = firstPackage.manufacturer();
-        String board = firstPackage.board();
-        String variant = firstPackage.variant();
-        if (parsedDevice != null) {
-            board = parsedDevice.deviceId();
-            variant = parsedDevice.variant();
-            @Nullable String mappedManufacturer = DEVICE_MANUFACTURERS.get(firstFragment(parsedDevice.deviceId()));
-            if (mappedManufacturer != null) {
-                manufacturer = mappedManufacturer;
-            }
+        List<ImageTarget> targets = new ArrayList<>();
+        for (DeviceNameParts relatedDevice : readRelatedDeviceNames(entity)) {
+            String manufacturer = DEVICE_MANUFACTURERS.getOrDefault(
+                    firstFragment(relatedDevice.deviceId()), firstPackage.targets().getFirst().manufacturer());
+            targets.add(new ImageTarget(manufacturer, relatedDevice.deviceId(), relatedDevice.variant()));
+        }
+        if (targets.isEmpty()) {
+            @Nullable DeviceNameParts parsedDevice = parseDeviceName("board-image", firstPackage.name(), deviceIds);
+            ImageTarget fallback = firstPackage.targets().getFirst();
+            targets.add(parsedDevice == null ? fallback : new ImageTarget(
+                    DEVICE_MANUFACTURERS.getOrDefault(firstFragment(parsedDevice.deviceId()), fallback.manufacturer()),
+                    parsedDevice.deviceId(), parsedDevice.variant()));
         }
 
         String strategy = components.getFirst().strategy();
@@ -589,9 +587,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 null,
                 atom,
                 displayName == null || displayName.isBlank() ? "image-combo/" + name : displayName,
-                manufacturer,
-                board,
-                variant,
+                targets,
                 strategy,
                 partitionMap,
                 distfiles,
@@ -646,16 +642,17 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         return fileName.endsWith(".toml") ? fileName.substring(0, fileName.length() - ".toml".length()) : fileName;
     }
 
-    /// Reads the related device name from a combo entity.
+    /// Reads all valid direct device and device-variant associations from a combo entity.
     ///
     /// @param entity combo entity.
-    /// @return related device name, or null when absent.
-    private static @Nullable DeviceNameParts readRelatedDeviceName(TomlTable entity) {
+    /// @return immutable device associations in encounter order.
+    private static @Unmodifiable List<DeviceNameParts> readRelatedDeviceNames(TomlTable entity) {
         @Nullable TomlArray related = entity.getArray("related");
         if (related == null) {
-            return null;
+            return List.of();
         }
 
+        List<DeviceNameParts> devices = new ArrayList<>();
         for (int i = 0; i < related.size(); i++) {
             Object value = related.get(i);
             if (!(value instanceof String text)) {
@@ -666,18 +663,18 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 String deviceVariant = text.substring("device-variant:".length());
                 int separator = deviceVariant.indexOf('@');
                 if (separator > 0 && separator < deviceVariant.length() - 1) {
-                    return new DeviceNameParts(
+                    devices.add(new DeviceNameParts(
                             deviceVariant.substring(0, separator),
-                            deviceVariant.substring(separator + 1));
+                            deviceVariant.substring(separator + 1)));
                 }
             } else if (text.startsWith("device:")) {
                 String device = text.substring("device:".length());
                 if (!device.isBlank()) {
-                    return new DeviceNameParts(device, "generic");
+                    devices.add(new DeviceNameParts(device, "generic"));
                 }
             }
         }
-        return null;
+        return List.copyOf(devices);
     }
 
     /// Reads one provisionable image manifest.

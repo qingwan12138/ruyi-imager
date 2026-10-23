@@ -447,12 +447,48 @@ public final class CliApplicationTest {
         assertEquals("image-list", root.path("type").asText());
         assertEquals(fixture.atom(), image.path("atom").asText());
         assertEquals("RevyOS image for Sipeed LicheePi 4A", image.path("displayName").asText());
-        assertEquals("Sipeed", image.path("manufacturer").asText());
-        assertEquals("sipeed-lpi4a", image.path("board").asText());
-        assertEquals("generic", image.path("variant").asText());
+        assertEquals(1, image.path("targets").size());
+        assertEquals("Sipeed", image.path("targets").path(0).path("manufacturer").asText());
+        assertEquals("sipeed-lpi4a", image.path("targets").path(0).path("board").asText());
+        assertEquals("generic", image.path("targets").path(0).path("variant").asText());
         assertEquals("dd-v1", image.path("strategy").asText());
         assertEquals("SUPPORTED", image.path("support").asText());
         assertEquals("image.raw", image.path("partitionMap").path("disk").asText());
+    }
+
+    /// Lists a shared combo once while exposing every associated target in JSON.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when fixture metadata cannot be written or output cannot be parsed.
+    @Test
+    public void listsAllSharedImageTargetsAsJson(@TempDir Path directory) throws Exception {
+        RuyiFixture fixture = createRuyiFixture(directory, "oerv-awol-d1-base", "openEuler D1", "oerv-d1",
+                "image.raw", "dd-v1", new byte[]{1}, new FixedBlockDeviceService(List.of()));
+        Path combos = Files.createDirectories(directory.resolve("repo/entities/image-combo"));
+        Files.writeString(combos.resolve("oerv-awol-d1-base.toml"), """
+                related = ["device-variant:awol-d1dev@generic", "device-variant:sipeed-licheerv@generic"]
+                [image-combo]
+                display_name = "openEuler D1"
+                package_atoms = ["board-image/oerv-awol-d1-base"]
+                """);
+        CliResult result = runCli(fixture.services(), "image", "list", "--json");
+        assertEquals(0, result.exitCode(), result.stderr());
+        JsonNode images = MAPPER.readTree(result.stdout()).path("images");
+        assertEquals(2, images.size());
+        int combosFound = 0;
+        for (JsonNode image : images) {
+            if (!image.path("category").asText().equals("image-combo")) {
+                continue;
+            }
+            combosFound++;
+            assertEquals("image-combo/oerv-awol-d1-base(1.0.0)", image.path("atom").asText());
+            assertEquals(2, image.path("targets").size());
+            assertEquals("Allwinner", image.path("targets").path(0).path("manufacturer").asText());
+            assertEquals("awol-d1dev", image.path("targets").path(0).path("board").asText());
+            assertEquals("Sipeed", image.path("targets").path(1).path("manufacturer").asText());
+            assertEquals("sipeed-licheerv", image.path("targets").path(1).path("board").asText());
+        }
+        assertEquals(1, combosFound);
     }
 
     /// Downloads a cached fixture distfile and materializes it through the public CLI.

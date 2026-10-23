@@ -51,6 +51,7 @@ import org.glavo.ruyi.imager.core.flash.FlashTarget;
 import org.glavo.ruyi.imager.core.image.ImageCatalog;
 import org.glavo.ruyi.imager.core.image.ImageCatalogService;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
+import org.glavo.ruyi.imager.core.image.ImageTarget;
 import org.glavo.ruyi.imager.core.repo.RepositoryService;
 import org.glavo.ruyi.imager.i18n.Messages;
 import org.glavo.ruyi.imager.update.BuildInfo;
@@ -102,6 +103,82 @@ import static org.junit.jupiter.api.parallel.Resources.SYSTEM_PROPERTIES;
 /// Smoke tests for JavaFX controls used by the main window selection flows.
 @NotNullByDefault
 public final class MainWindowJavaFxSmokeTest {
+    /// Checks shared-image filtering, counts, search, and selection without changing the chosen board.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void selectsSharedImageForEveryRelatedBoard(@TempDir Path directory) throws Exception {
+        runOnJavaFxThread(() -> {
+            MainWindow window = new MainWindow(testServices(directory));
+            try {
+                ImageEntry image = new ImageEntry("test", "image-combo", "shared", "1.0.0", null,
+                        "image-combo/shared(1.0.0)", "Shared image",
+                        List.of(new ImageTarget("Allwinner", "awol-d1dev", "sd"),
+                                new ImageTarget("Sipeed", "sipeed-licheerv", "generic"),
+                                new ImageTarget("Sipeed", "sipeed-licheerv", "alternate")),
+                        "dd-v1", Map.of("disk", "image.img"), List.of(), StrategySupport.SUPPORTED, List.of());
+                var manufacturers = MainWindow.class.getDeclaredMethod("manufacturerOptions", List.class);
+                manufacturers.setAccessible(true);
+                List<?> options = (List<?>) manufacturers.invoke(null, List.of(image));
+                assertEquals(2, options.size());
+                for (Object option : options) {
+                    var count = option.getClass().getDeclaredMethod("imageCount");
+                    count.setAccessible(true);
+                    assertEquals(1, count.invoke(option));
+                    var boards = option.getClass().getDeclaredMethod("boardCount");
+                    boards.setAccessible(true);
+                    assertEquals(1, boards.invoke(option));
+                }
+                var boards = MainWindow.class.getDeclaredMethod("boardOptions", List.class, String.class);
+                boards.setAccessible(true);
+                List<?> sipeedBoards = (List<?>) boards.invoke(null, List.of(image), "Sipeed");
+                assertEquals(1, sipeedBoards.size());
+                Object board = sipeedBoards.getFirst();
+                var boardName = board.getClass().getDeclaredMethod("name");
+                boardName.setAccessible(true);
+                assertEquals("sipeed-licheerv", boardName.invoke(board));
+                var count = board.getClass().getDeclaredMethod("imageCount");
+                count.setAccessible(true);
+                assertEquals(1, count.invoke(board));
+                var filter = MainWindow.class.getDeclaredMethod("filteredImages", List.class, String.class, String.class);
+                filter.setAccessible(true);
+                assertEquals(List.of(image), filter.invoke(null, List.of(image), "Sipeed", "sipeed-licheerv"));
+                assertEquals(List.of(image), filter.invoke(null, List.of(image), "Allwinner", "awol-d1dev"));
+                assertEquals(List.of(), filter.invoke(null, List.of(image), "Allwinner", "sipeed-licheerv"));
+                var search = MainWindow.class.getDeclaredMethod("imageMatches", ImageEntry.class, String.class);
+                search.setAccessible(true);
+                assertEquals(true, search.invoke(null, image, "sipeed-licheerv"));
+                assertEquals(true, search.invoke(null, image, "alternate"));
+                var stateField = MainWindow.class.getDeclaredField("state");
+                stateField.setAccessible(true);
+                var constructor = stateField.getType().getDeclaredConstructor(
+                        String.class, String.class, ImageEntry.class, Path.class, FlashTarget.class);
+                constructor.setAccessible(true);
+                stateField.set(window, constructor.newInstance("Sipeed", "sipeed-licheerv", null, null, null));
+                var select = MainWindow.class.getDeclaredMethod("selectCatalogImage", ImageEntry.class);
+                select.setAccessible(true);
+                select.invoke(window, image);
+                Object state = stateField.get(window);
+                for (String field : List.of("manufacturerName", "boardName", "image")) {
+                    var accessor = stateField.getType().getDeclaredMethod(field);
+                    accessor.setAccessible(true);
+                    assertEquals(switch (field) {
+                        case "manufacturerName" -> "Sipeed";
+                        case "boardName" -> "sipeed-licheerv";
+                        default -> image;
+                    }, accessor.invoke(state));
+                }
+                var variants = MainWindow.class.getDeclaredMethod("imageVariants", ImageEntry.class);
+                variants.setAccessible(true);
+                assertEquals("alternate, generic", variants.invoke(window, image));
+            } finally {
+                window.shutdown();
+            }
+            return null;
+        });
+    }
+
     /// Maximum time to wait for one JavaFX action.
     private static final long FX_TIMEOUT_SECONDS = 10L;
 
