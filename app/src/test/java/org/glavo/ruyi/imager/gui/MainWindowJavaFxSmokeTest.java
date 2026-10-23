@@ -28,7 +28,10 @@ import javafx.scene.control.Label;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Pane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.paint.LinearGradient;
@@ -87,6 +90,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
@@ -291,6 +295,40 @@ public final class MainWindowJavaFxSmokeTest {
             }
             return null;
         });
+    }
+
+    /// Verifies that dialogs map Escape to cancel and Enter to confirm.
+    ///
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void handlesDialogKeyboardShortcuts() throws Exception {
+        runOnJavaFxThread(() -> {
+            Pane content = new Pane();
+            AtomicInteger cancels = new AtomicInteger();
+            AtomicInteger confirms = new AtomicInteger();
+            MainWindow.installDialogKeyHandling(content, cancels::incrementAndGet, confirms::incrementAndGet);
+
+            content.fireEvent(keyPressed(KeyCode.ESCAPE));
+            assertEquals(1, cancels.get());
+            assertEquals(0, confirms.get());
+
+            content.fireEvent(keyPressed(KeyCode.ENTER));
+            assertEquals(1, cancels.get());
+            assertEquals(1, confirms.get());
+
+            content.fireEvent(keyPressed(KeyCode.A));
+            assertEquals(1, cancels.get());
+            assertEquals(1, confirms.get());
+            return null;
+        });
+    }
+
+    /// Creates a key-pressed event for dialog shortcut tests.
+    ///
+    /// @param code key code.
+    /// @return key event.
+    private static KeyEvent keyPressed(KeyCode code) {
+        return new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code, false, false, false, false);
     }
 
     /// Verifies that multi-partition storage selectors produce a partition target map.
