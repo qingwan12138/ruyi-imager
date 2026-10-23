@@ -53,8 +53,8 @@ public final class ProcessFastbootService implements FastbootService {
     /// Timeout used for long-running fastboot flashing commands.
     private static final Duration FLASH_TIMEOUT = Duration.ofHours(4);
 
-    /// Delay between SpacemiT K1 bootloader handoff stages.
-    private static final Duration SPACEMIT_K1_HANDOFF_DELAY = Duration.ofSeconds(1);
+    /// Delay between SpacemiT bootloader handoff stages.
+    private static final Duration SPACEMIT_HANDOFF_DELAY = Duration.ofSeconds(1);
 
     /// Delay after LPi4A jumps from RAM-loaded U-Boot into target U-Boot fastboot.
     private static final Duration LPI4A_UBOOT_HANDOFF_DELAY = Duration.ofSeconds(1);
@@ -172,8 +172,8 @@ public final class ProcessFastbootService implements FastbootService {
         if (ProvisionStrategies.FASTBOOT_LPI4A_UBOOT_V1.equals(strategy)) {
             return flashLpi4aUboot(partitions, device, reporter);
         }
-        if (ProvisionStrategies.SPACEMIT_K1_V1.equals(strategy)) {
-            return new FastbootFlashResult(flashSpacemitK1(partitions, device, reporter), device);
+        if (ProvisionStrategies.SPACEMIT_K1_V1.equals(strategy) || ProvisionStrategies.SPACEMIT_K3_V1.equals(strategy)) {
+            return new FastbootFlashResult(flashSpacemit(strategy, partitions, device, reporter), device);
         }
 
         return new FastbootFlashResult(
@@ -262,20 +262,32 @@ public final class ProcessFastbootService implements FastbootService {
         return OperationResult.success(SdkMessages.get("core.fastboot.success"));
     }
 
-    /// Flashes a SpacemiT K1 eMMC image using the Bianbu fastboot handoff sequence.
+    /// Flashes a SpacemiT image after the Bianbu FSBL and U-Boot handoff sequence.
     ///
+    /// @param strategy validated SpacemiT K1 or K3 strategy.
     /// @param partitions materialized partition images.
     /// @param device target fastboot device.
     /// @param reporter progress reporter.
     /// @return operation result.
     /// @throws IOException when fastboot cannot be executed.
-    private OperationResult flashSpacemitK1(
+    private OperationResult flashSpacemit(
+            String strategy,
             @Unmodifiable Map<String, Path> partitions,
             FastbootDevice device,
             ProgressReporter reporter) throws IOException {
         Path fsbl = Objects.requireNonNull(partitions.get("fsbl"));
-        Path uboot = Objects.requireNonNull(partitions.get("uboot"));
-        int totalSteps = ProvisionStrategies.SPACEMIT_K1_PARTITION_ORDER.size() + 6;
+        boolean k3 = ProvisionStrategies.SPACEMIT_K3_V1.equals(strategy);
+        Path uboot = Objects.requireNonNull(k3
+                ? partitions.getOrDefault("uboot_stage", partitions.get("uboot"))
+                : partitions.get("uboot"));
+        List<String> partitionOrder = new ArrayList<>();
+        if (k3 && partitions.containsKey("mtd")) {
+            partitionOrder.addAll(List.of("mtd", "bootinfo_mtd", "fsbl", "env", "esos", "opensbi", "uboot"));
+        }
+        partitionOrder.addAll(k3
+                ? ProvisionStrategies.SPACEMIT_K3_PARTITION_ORDER
+                : ProvisionStrategies.SPACEMIT_K1_PARTITION_ORDER);
+        int totalSteps = partitionOrder.size() + 6;
         int completedSteps = 0;
 
         String stageFsblMessage = SdkMessages.get("core.fastboot.spacemit.stageFsbl");
@@ -302,7 +314,7 @@ public final class ProcessFastbootService implements FastbootService {
 
         String waitFsblMessage = SdkMessages.get("core.fastboot.spacemit.waitFsbl");
         reporter.report(progress(waitFsblMessage, completedSteps, totalSteps));
-        sleepSpacemitK1Handoff();
+        sleepSpacemitHandoff();
         reporter.report(progress(waitFsblMessage, ++completedSteps, totalSteps));
 
         String stageUbootMessage = SdkMessages.get("core.fastboot.spacemit.stageUboot");
@@ -329,11 +341,16 @@ public final class ProcessFastbootService implements FastbootService {
 
         String waitUbootMessage = SdkMessages.get("core.fastboot.spacemit.waitUboot");
         reporter.report(progress(waitUbootMessage, completedSteps, totalSteps));
-        sleepSpacemitK1Handoff();
+        sleepSpacemitHandoff();
         reporter.report(progress(waitUbootMessage, ++completedSteps, totalSteps));
 
-        for (String partition : ProvisionStrategies.SPACEMIT_K1_PARTITION_ORDER) {
-            Path image = Objects.requireNonNull(partitions.get(partition));
+        for (String imageKey : partitionOrder) {
+            Path image = Objects.requireNonNull(partitions.get(imageKey));
+            String partition = switch (imageKey) {
+                case "bootinfo_mtd" -> "bootinfo";
+                case "esp" -> "ESP";
+                default -> imageKey;
+            };
             String flashMessage = SdkMessages.get("core.fastboot.flashingPartition", partition);
             reporter.report(progress(flashMessage, completedSteps, totalSteps));
             result = runFastboot(
@@ -565,12 +582,12 @@ public final class ProcessFastbootService implements FastbootService {
         return message.contains(LPI4A_RAM_TARGET_MISSING_OUTPUT);
     }
 
-    /// Sleeps between SpacemiT K1 handoff stages.
+    /// Sleeps between SpacemiT handoff stages.
     ///
     /// @throws IOException when interrupted.
-    private static void sleepSpacemitK1Handoff() throws IOException {
+    private static void sleepSpacemitHandoff() throws IOException {
         try {
-            Thread.sleep(SPACEMIT_K1_HANDOFF_DELAY.toMillis());
+            Thread.sleep(SPACEMIT_HANDOFF_DELAY.toMillis());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException(SdkMessages.get("core.fastboot.spacemit.handoffInterrupted"), e);

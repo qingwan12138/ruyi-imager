@@ -387,12 +387,14 @@ public final class RuyiImageCatalogServiceTest {
         assertNull(service.findImage("image-combo/conflicting-fastboot"));
     }
 
-    /// Verifies SpacemiT K1 Bianbu provision strategy is exposed as supported.
+    /// Verifies SpacemiT Bianbu provision strategies are exposed as supported.
     ///
+    /// @param strategy SpacemiT provision strategy.
     /// @param temporaryDirectory temporary test directory.
     /// @throws Exception when test fixture files cannot be created or read.
-    @Test
-    public void classifiesSpacemitK1ImagesAsSupported(@TempDir Path temporaryDirectory) throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"spacemit-k1-v1", "spacemit-k3-v1"})
+    public void classifiesSpacemitImagesAsSupported(String strategy, @TempDir Path temporaryDirectory) throws Exception {
         Path configDirectory = temporaryDirectory.resolve("config");
         Path cacheDirectory = temporaryDirectory.resolve("cache");
         Path repoDirectory = temporaryDirectory.resolve("repo");
@@ -402,10 +404,10 @@ public final class RuyiImageCatalogServiceTest {
         writeImageManifest(
                 repoDirectory,
                 "1.2.3",
-                "Bianbu image for SpacemiT K1",
-                "bianbu-k1",
+                "Bianbu image for SpacemiT",
+                "bianbu",
                 "image.zip",
-                "spacemit-k1-v1");
+                strategy);
 
         RuyiImageCatalogService service = new RuyiImageCatalogService(
                 new AppDirectories(configDirectory, cacheDirectory),
@@ -413,7 +415,7 @@ public final class RuyiImageCatalogServiceTest {
 
         ImageEntry image = service.listImages().images().getFirst();
 
-        assertEquals("spacemit-k1-v1", image.strategy());
+        assertEquals(strategy, image.strategy());
         assertEquals(StrategySupport.SUPPORTED, image.support());
     }
 

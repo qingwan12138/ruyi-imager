@@ -513,6 +513,34 @@ public final class LocalFlashServiceTest {
         assertEquals(root, fastboot.partitions.get("root"));
     }
 
+    /// Rejects invalid K3 optional inputs before invoking the fastboot backend.
+    ///
+    /// @param imageKey optional image key to invalidate.
+    /// @param empty whether the file is empty rather than missing.
+    /// @param directory isolated fixture directory.
+    /// @throws Exception when fixture files cannot be created or read.
+    @ParameterizedTest
+    @CsvSource({"uboot_stage,false", "uboot_stage,true", "bootinfo_mtd,false", "bootinfo_mtd,true"})
+    public void preflightsSpacemitK3OptionalFiles(String imageKey, boolean empty, @TempDir Path directory) throws Exception {
+        Map<String, String> partitions = new LinkedHashMap<>();
+        for (String key : List.of("gpt", "env", "bootinfo", "fsbl", "esos", "opensbi", "uboot", "esp",
+                "bootfs", "rootfs", "mtd", "bootinfo_mtd", "uboot_stage")) {
+            String fileName = key + ".img";
+            partitions.put(key, fileName);
+            if (!key.equals(imageKey)) {
+                Files.write(directory.resolve(fileName), new byte[]{1});
+            } else if (empty) {
+                Files.createFile(directory.resolve(fileName));
+            }
+        }
+        CapturingFastbootService fastboot = new CapturingFastbootService();
+        LocalFlashService service = new LocalFlashService(new FixedImageCatalogService(directory), fastboot);
+        FlashRequest request = new FlashRequest(imageEntry("spacemit-k3-v1", Map.copyOf(partitions)), null,
+                FlashTarget.fastbootDevice(new FastbootDevice("abc123", "abc123", "fastboot")), false);
+        assertThrows(IOException.class, () -> service.flash(request, NO_PROGRESS));
+        assertTrue(fastboot.calls.isEmpty());
+    }
+
     /// Flashes a fastboot image combo by preserving each component strategy.
     ///
     /// @param temporaryDirectory temporary test directory.
@@ -606,6 +634,7 @@ public final class LocalFlashServiceTest {
             "dd-v1, dd-v1, empty.img, true",
             "fastboot-v1, fastboot-v1(lpi4a-uboot), second.img, false",
             "fastboot-v1, spacemit-k1-v1, second.img, false",
+            "fastboot-v1, spacemit-k3-v1, second.img, false",
             "fastboot-v1, unknown-v1, second.img, false",
             "fastboot-v1, dd-v1, second.img, false",
             "dd-v1, fastboot-v1, second.img, false"
@@ -653,7 +682,7 @@ public final class LocalFlashServiceTest {
             assertFalse(result.success(), result.message());
             String expectedDetail = switch (secondStrategy) {
                 case "fastboot-v1(lpi4a-uboot)" -> "uboot";
-                case "spacemit-k1-v1" -> "gpt";
+                case "spacemit-k1-v1", "spacemit-k3-v1" -> "gpt";
                 default -> secondStrategy;
             };
             assertTrue(result.message().contains(expectedDetail), result.message());

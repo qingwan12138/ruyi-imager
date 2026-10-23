@@ -36,6 +36,9 @@ public final class GuiSelectionRulesTest {
         assertTrue(GuiSelectionRules.catalogImageFlashable(image(
                 "spacemit-k1-v1",
                 Map.of("fsbl", "FSBL.bin", "uboot", "u-boot.itb"))));
+        assertTrue(GuiSelectionRules.catalogImageFlashable(image(
+                "spacemit-k3-v1",
+                Map.of("fsbl", "FSBL.bin", "uboot", "edk2.itb", "uboot_stage", "u-boot.itb"))));
         assertFalse(GuiSelectionRules.catalogImageFlashable(image("dd-v1", Map.of())));
         assertFalse(GuiSelectionRules.catalogImageFlashable(image("vendor-custom-v1", Map.of("disk", "image.raw"))));
         assertFalse(GuiSelectionRules.catalogImageFlashable(image(
@@ -57,6 +60,7 @@ public final class GuiSelectionRulesTest {
         ImageEntry partitionDd = image("dd-v1", Map.of("boot", "boot.img", "root", "root.img"));
         ImageEntry fastboot = image("fastboot-v1", Map.of("boot", "boot.img"));
         ImageEntry spacemit = image("spacemit-k1-v1", Map.of("fsbl", "FSBL.bin", "uboot", "u-boot.itb"));
+        ImageEntry k3 = image("spacemit-k3-v1", Map.of("fsbl", "FSBL.bin", "uboot", "u-boot.itb"));
 
         assertSame(blockTarget, GuiSelectionRules.compatibleTarget(blockTarget, null, Path.of("local.raw")));
         assertNull(GuiSelectionRules.compatibleTarget(fastbootTarget, null, Path.of("local.raw")));
@@ -68,6 +72,8 @@ public final class GuiSelectionRulesTest {
         assertNull(GuiSelectionRules.compatibleTarget(blockTarget, fastboot, null));
         assertSame(fastbootTarget, GuiSelectionRules.compatibleTarget(fastbootTarget, spacemit, null));
         assertNull(GuiSelectionRules.compatibleTarget(blockTarget, spacemit, null));
+        assertSame(fastbootTarget, GuiSelectionRules.compatibleTarget(fastbootTarget, k3, null));
+        assertNull(GuiSelectionRules.compatibleTarget(blockTarget, k3, null));
     }
 
     /// Verifies multi-partition target completeness, uniqueness, and safety checks.

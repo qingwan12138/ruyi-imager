@@ -34,6 +34,8 @@ import org.jetbrains.annotations.Unmodifiable;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -338,24 +340,30 @@ public final class CliApplicationTest {
         assertEquals(boot, fastboot.partitions.get("boot"));
     }
 
-    /// Flashes a Bianbu SpacemiT K1 catalog image through the public CLI fastboot target path.
+    /// Flashes Bianbu SpacemiT catalog images through the public CLI fastboot target path.
     ///
+    /// @param strategy SpacemiT provision strategy.
     /// @param temporaryDirectory temporary test directory.
     /// @throws Exception when fixture files cannot be written or JSON cannot be parsed.
-    @Test
-    public void flashSpacemitK1ImageUsesFastbootSerial(@TempDir Path temporaryDirectory) throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"spacemit-k1-v1", "spacemit-k3-v1"})
+    public void flashSpacemitImageUsesFastbootSerial(String strategy, @TempDir Path temporaryDirectory) throws Exception {
         Path artifactDirectory = temporaryDirectory.resolve("artifact");
         Files.createDirectories(artifactDirectory);
         Path fsbl = artifactDirectory.resolve("FSBL.bin");
         Path uboot = artifactDirectory.resolve("u-boot.itb");
-        @Unmodifiable Map<String, String> partitions = Map.of(
+        Map<String, String> partitions = new LinkedHashMap<>(Map.of(
                 "gpt", "gpt.bin", "bootinfo", "bootinfo.bin", "fsbl", "FSBL.bin", "env", "env.bin",
-                "opensbi", "opensbi.bin", "uboot", "u-boot.itb", "bootfs", "bootfs.img", "rootfs", "rootfs.img");
+                "opensbi", "opensbi.bin", "uboot", "u-boot.itb", "bootfs", "bootfs.img", "rootfs", "rootfs.img"));
+        if (strategy.equals("spacemit-k3-v1")) {
+            partitions.put("esos", "esos.itb");
+            partitions.put("esp", "esp.vfat");
+        }
         for (String fileName : partitions.values()) {
             Files.write(artifactDirectory.resolve(fileName), new byte[]{1, 2, 3});
         }
 
-        ImageEntry image = imageEntry("spacemit-k1-v1", partitions);
+        ImageEntry image = imageEntry(strategy, Map.copyOf(partitions));
         CapturingFastbootService fastboot = new CapturingFastbootService(
                 new FastbootDevice("test-fastboot", "test-fastboot", "fastboot"));
 
@@ -378,7 +386,7 @@ public final class CliApplicationTest {
         JsonNode finalEvent = MAPPER.readTree(lines[lines.length - 1]);
         assertEquals("complete", finalEvent.path("type").asText());
         assertTrue(finalEvent.path("success").asBoolean());
-        assertEquals("spacemit-k1-v1", fastboot.strategy);
+        assertEquals(strategy, fastboot.strategy);
         assertEquals(partitions.keySet(), fastboot.partitions.keySet());
         assertEquals(fsbl, fastboot.partitions.get("fsbl"));
         assertEquals(uboot, fastboot.partitions.get("uboot"));

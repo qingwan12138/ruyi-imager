@@ -6,7 +6,10 @@ package org.glavo.ruyi.imager.core.fastboot;
 import org.glavo.ruyi.imager.core.ProgressEvent;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Unmodifiable;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -368,6 +371,120 @@ public final class ProcessFastbootServiceTest {
         ProgressEvent last = progress.getLast();
         assertEquals(1000L, last.currentBytes());
         assertEquals(1000L, last.totalBytes());
+    }
+
+    /// Checks K3 command order, bootloader selection, partition aliases, and progress for both firmware variants.
+    ///
+    /// @param uefi whether the image includes SPI NOR and a separate staging bootloader.
+    /// @throws Exception when the simulated flash fails.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void spacemitK3FlashesInUpstreamOrder(boolean uefi) throws Exception {
+        ArrayList<List<String>> commands = new ArrayList<>();
+        ProcessFastbootService service = new ProcessFastbootService("fastboot-test", (command, _) -> {
+            commands.add(List.copyOf(command));
+            return new ProcessFastbootService.CommandResult(0, "OKAY\n", false);
+        });
+        ArrayList<ProgressEvent> progress = new ArrayList<>();
+        FastbootDevice device = new FastbootDevice("abc123", "abc123", "fastboot");
+        FastbootFlashResult result = service.flash("spacemit-k3-v1", k3Partitions(uefi), device, progress::add);
+
+        assertTrue(result.result().success(), result.result().message());
+        assertEquals(device, result.device());
+        List<List<String>> expected = new ArrayList<>(List.of(
+                List.of("stage", "FSBL.bin"), List.of("continue"),
+                List.of("stage", "u-boot.itb"), List.of("continue")));
+        if (uefi) {
+            expected.addAll(List.of(
+                    List.of("flash", "mtd", "partition_4M.json"),
+                    List.of("flash", "bootinfo", "bootinfo_spinor.bin"),
+                    List.of("flash", "fsbl", "FSBL.bin"),
+                    List.of("flash", "env", "env.bin"),
+                    List.of("flash", "esos", "esos.itb"),
+                    List.of("flash", "opensbi", "fw_dynamic.itb"),
+                    List.of("flash", "uboot", "edk2.itb")));
+        }
+        expected.addAll(List.of(
+                List.of("flash", "gpt", "partition_universal.json"),
+                List.of("flash", "env", "env.bin"),
+                List.of("flash", "bootinfo", "bootinfo_block.bin"),
+                List.of("flash", "fsbl", "FSBL.bin"),
+                List.of("flash", "esos", "esos.itb"),
+                List.of("flash", "opensbi", "fw_dynamic.itb"),
+                List.of("flash", "uboot", uefi ? "edk2.itb" : "u-boot.itb"),
+                List.of("flash", "ESP", "esp.vfat"),
+                List.of("flash", "bootfs", "bootfs.ext4"),
+                List.of("flash", "rootfs", "rootfs.ext4")));
+        assertEquals(expected.size(), commands.size());
+        for (int i = 0; i < expected.size(); i++) {
+            assertEquals(List.of("fastboot-test", "-s", "abc123"), commands.get(i).subList(0, 3));
+            assertEquals(expected.get(i), commands.get(i).subList(3, commands.get(i).size()));
+        }
+        long total = (expected.size() + 2L) * 1000L;
+        long previous = 0;
+        for (ProgressEvent event : progress) {
+            assertEquals(total, event.totalBytes());
+            assertTrue(event.currentBytes() >= previous && event.currentBytes() <= total);
+            previous = event.currentBytes();
+        }
+        assertEquals(total, progress.getLast().currentBytes());
+    }
+
+    /// Rejects incomplete K3 metadata before issuing even the first staging command.
+    ///
+    /// @param missing required image key removed from the fixture.
+    /// @throws Exception when validation fails unexpectedly.
+    @ParameterizedTest
+    @ValueSource(strings = {"gpt", "env", "bootinfo", "fsbl", "esos", "opensbi", "uboot", "esp", "bootfs", "rootfs", "bootinfo_mtd"})
+    public void spacemitK3RejectsMissingImagesBeforeStaging(String missing) throws Exception {
+        Map<String, Path> partitions = new LinkedHashMap<>(k3Partitions(true));
+        partitions.remove(missing);
+        ProcessFastbootService service = new ProcessFastbootService("fastboot-test", (_, _) -> {
+            throw new AssertionError("Incomplete metadata must not execute fastboot");
+        });
+        FastbootFlashResult result = service.flash("spacemit-k3-v1", Map.copyOf(partitions),
+                new FastbootDevice("abc123", "abc123", "fastboot"), _ -> {});
+        assertFalse(result.result().success());
+        assertTrue(result.result().message().contains(missing), result.result().message());
+    }
+
+    /// Stops K3 provisioning when a bootloader, SPI NOR, or UFS command fails.
+    ///
+    /// @param failureIndex zero-based command index at which to fail.
+    /// @throws Exception when the simulated flash fails unexpectedly.
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2, 3, 4, 5, 10, 11, 20})
+    public void spacemitK3StopsOnCommandFailure(int failureIndex) throws Exception {
+        List<List<String>> commands = new ArrayList<>();
+        ProcessFastbootService service = new ProcessFastbootService("fastboot-test", (command, _) -> {
+            commands.add(List.copyOf(command));
+            return commands.size() == failureIndex + 1
+                    ? new ProcessFastbootService.CommandResult(1, "FAILED (remote: 'test failure')\n", false)
+                    : new ProcessFastbootService.CommandResult(0, "OKAY\n", false);
+        });
+        FastbootFlashResult result = service.flash("spacemit-k3-v1", k3Partitions(true),
+                new FastbootDevice("abc123", "abc123", "fastboot"), _ -> {});
+        assertFalse(result.result().success());
+        assertEquals(failureIndex + 1, commands.size());
+    }
+
+    /// Returns K3 image paths, optionally including the UEFI SPI NOR and staging inputs.
+    ///
+    /// @param uefi whether to include UEFI inputs.
+    /// @return immutable image map.
+    private static @Unmodifiable Map<String, Path> k3Partitions(boolean uefi) {
+        Map<String, Path> partitions = new LinkedHashMap<>(Map.of(
+                "bootfs", Path.of("bootfs.ext4"), "bootinfo", Path.of("bootinfo_block.bin"),
+                "env", Path.of("env.bin"), "esos", Path.of("esos.itb"), "esp", Path.of("esp.vfat"),
+                "fsbl", Path.of("FSBL.bin"), "gpt", Path.of("partition_universal.json"),
+                "opensbi", Path.of("fw_dynamic.itb"), "rootfs", Path.of("rootfs.ext4"),
+                "uboot", Path.of(uefi ? "edk2.itb" : "u-boot.itb")));
+        if (uefi) {
+            partitions.put("uboot_stage", Path.of("u-boot.itb"));
+            partitions.put("mtd", Path.of("partition_4M.json"));
+            partitions.put("bootinfo_mtd", Path.of("bootinfo_spinor.bin"));
+        }
+        return Map.copyOf(partitions);
     }
 
     /// Runs the SpacemiT K1 handoff and partition flashing sequence used by Bianbu eMMC images.

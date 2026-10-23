@@ -4,7 +4,7 @@
 
 - Build a Java 25 CLI/JavaFX GUI for catalog and local-image flashing without invoking the external `ruyi` command.
 - Share metadata, download, materialization, and flashing services between the CLI and GUI.
-- Support `dd-v1`, `fastboot-v1`, `fastboot-v1(lpi4a-uboot)`, and SpacemiT K1 eMMC fastboot workflows.
+- Support `dd-v1`, `fastboot-v1`, `fastboot-v1(lpi4a-uboot)`, and SpacemiT K1 eMMC / K3 UFS fastboot workflows, including K3 UEFI SPI NOR provisioning.
 
 ## Current Status
 
@@ -21,6 +21,7 @@
 
 - Run read-only Linux/macOS block-device enumeration smoke tests on real machines.
 - Continue real Windows removable-device validation for raw writes, volume lock/dismount, cancellation, and verification.
+- Validate K3 UFS and UEFI SPI NOR provisioning on hardware, including fastboot serial continuity and USB re-enumeration across both bootloader handoffs.
 - Validate non-host `dd-flasher` release builds with an appropriate linker or `cross` environment.
 - After real-device validation, remove or downgrade diagnostics that are only useful for troubleshooting.
 - Before enabling application updates, validate installation using real Windows setup, Debian, and macOS package artifacts.

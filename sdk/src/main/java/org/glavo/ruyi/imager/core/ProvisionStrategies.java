@@ -25,9 +25,16 @@ public final class ProvisionStrategies {
     /// SpacemiT K1 fastboot handoff and eMMC flashing strategy used by Bianbu images.
     public static final String SPACEMIT_K1_V1 = "spacemit-k1-v1";
 
+    /// SpacemiT K3 fastboot handoff, optional SPI NOR, and UFS flashing strategy.
+    public static final String SPACEMIT_K3_V1 = "spacemit-k3-v1";
+
     /// Required SpacemiT K1 eMMC partitions in flashing order.
     public static final @Unmodifiable List<String> SPACEMIT_K1_PARTITION_ORDER =
             List.of("gpt", "bootinfo", "fsbl", "env", "opensbi", "uboot", "bootfs", "rootfs");
+
+    /// Required SpacemiT K3 UFS image keys in flashing order; `esp` targets `ESP`.
+    public static final @Unmodifiable List<String> SPACEMIT_K3_PARTITION_ORDER =
+            List.of("gpt", "env", "bootinfo", "fsbl", "esos", "opensbi", "uboot", "esp", "bootfs", "rootfs");
 
     /// Prevents construction of the strategy utility.
     private ProvisionStrategies() {
@@ -48,7 +55,8 @@ public final class ProvisionStrategies {
     public static boolean isFastboot(String strategy) {
         return FASTBOOT_V1.equals(strategy)
                 || FASTBOOT_LPI4A_UBOOT_V1.equals(strategy)
-                || SPACEMIT_K1_V1.equals(strategy);
+                || SPACEMIT_K1_V1.equals(strategy)
+                || SPACEMIT_K3_V1.equals(strategy);
     }
 
     /// Returns whether two strategies belong to the same supported flashing family.
@@ -63,6 +71,7 @@ public final class ProvisionStrategies {
     /// Checks a fastboot strategy and its required partition names without accessing a device.
     ///
     /// This checks metadata only; it does not verify image files or device compatibility.
+    /// K3 images that include `mtd` must also include `bootinfo_mtd`.
     ///
     /// @param strategy provision strategy.
     /// @param partitions available partition names.
@@ -77,12 +86,16 @@ public final class ProvisionStrategies {
         @Unmodifiable List<String> required = switch (strategy) {
             case FASTBOOT_LPI4A_UBOOT_V1 -> List.of("uboot");
             case SPACEMIT_K1_V1 -> SPACEMIT_K1_PARTITION_ORDER;
+            case SPACEMIT_K3_V1 -> SPACEMIT_K3_PARTITION_ORDER;
             default -> List.of();
         };
         for (String partition : required) {
             if (!partitions.contains(partition)) {
                 return SdkMessages.get("core.fastboot.missingPartition", partition);
             }
+        }
+        if (SPACEMIT_K3_V1.equals(strategy) && partitions.contains("mtd") && !partitions.contains("bootinfo_mtd")) {
+            return SdkMessages.get("core.fastboot.missingPartition", "bootinfo_mtd");
         }
         return null;
     }
@@ -102,7 +115,7 @@ public final class ProvisionStrategies {
     /// @param strategy strategy name.
     /// @return flashing priority, where higher values run earlier.
     public static int priority(String strategy) {
-        if (FASTBOOT_LPI4A_UBOOT_V1.equals(strategy)) {
+        if (FASTBOOT_LPI4A_UBOOT_V1.equals(strategy) || SPACEMIT_K3_V1.equals(strategy)) {
             return 10;
         }
         return 0;
