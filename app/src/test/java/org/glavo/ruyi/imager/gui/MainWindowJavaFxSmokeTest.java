@@ -28,7 +28,10 @@ import javafx.scene.control.Label;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Pane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.paint.LinearGradient;
@@ -87,6 +90,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
@@ -289,6 +293,78 @@ public final class MainWindowJavaFxSmokeTest {
             } finally {
                 Messages.setLocale(originalLocale);
             }
+            return null;
+        });
+    }
+
+    /// Verifies that dialogs map Escape to cancel and Enter to confirm.
+    ///
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void handlesDialogKeyboardShortcuts() throws Exception {
+        runOnJavaFxThread(() -> {
+            Pane content = new Pane();
+            AtomicInteger cancels = new AtomicInteger();
+            AtomicInteger confirms = new AtomicInteger();
+            MainWindow.installDialogKeyHandling(content, cancels::incrementAndGet, confirms::incrementAndGet);
+
+            content.fireEvent(keyPressed(KeyCode.ESCAPE));
+            assertEquals(1, cancels.get());
+            assertEquals(0, confirms.get());
+
+            content.fireEvent(keyPressed(KeyCode.ENTER));
+            assertEquals(1, cancels.get());
+            assertEquals(1, confirms.get());
+
+            content.fireEvent(keyPressed(KeyCode.A));
+            assertEquals(1, cancels.get());
+            assertEquals(1, confirms.get());
+            return null;
+        });
+    }
+
+    /// Creates a key-pressed event for dialog shortcut tests.
+    ///
+    /// @param code key code.
+    /// @return key event.
+    private static KeyEvent keyPressed(KeyCode code) {
+        return new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code, false, false, false, false);
+    }
+
+    /// Verifies that Enter activates the focused button instead of confirming the dialog.
+    ///
+    /// JavaFX maps Enter to buttons on some platforms only, so the dialog activates the focused
+    /// button itself: pressing Enter on a focused cancel button must cancel rather than run the
+    /// primary action, which would start writing to the device from the flash confirmation dialog.
+    ///
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void activatesFocusedButtonForEnter() throws Exception {
+        runOnJavaFxThread(() -> {
+            AtomicInteger buttonActions = new AtomicInteger();
+            MFXButton cancelButton = new MFXButton("Cancel");
+            cancelButton.setOnAction(_ -> buttonActions.incrementAndGet());
+            Pane content = new Pane(cancelButton);
+            AtomicInteger cancels = new AtomicInteger();
+            AtomicInteger confirms = new AtomicInteger();
+            MainWindow.installDialogKeyHandling(content, cancels::incrementAndGet, confirms::incrementAndGet);
+
+            Scene scene = new Scene(content, 240.0, 120.0);
+            cancelButton.requestFocus();
+            assertSame(cancelButton, scene.getFocusOwner());
+
+            content.fireEvent(keyPressed(KeyCode.ENTER));
+            assertEquals(1, buttonActions.get());
+            assertEquals(0, confirms.get());
+            assertEquals(0, cancels.get());
+
+            TextField searchField = new TextField();
+            content.getChildren().add(searchField);
+            searchField.requestFocus();
+            assertSame(searchField, scene.getFocusOwner());
+
+            content.fireEvent(keyPressed(KeyCode.ENTER));
+            assertEquals(1, confirms.get());
             return null;
         });
     }

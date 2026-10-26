@@ -16,7 +16,11 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Parent;
+import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBase;
+import javafx.scene.control.Cell;
+import javafx.scene.control.Control;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ProgressBar;
@@ -27,6 +31,10 @@ import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
+import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
@@ -352,7 +360,8 @@ public final class MainWindow {
                 messageContent(Messages.get("gui.dialog.startupSafetyWarning.message")),
                 "gui.dialog.ok",
                 "material-warning-dialog",
-                false);
+                false,
+                null);
         if (!confirmed) {
             return;
         }
@@ -1116,7 +1125,8 @@ public final class MainWindow {
                     Messages.get("gui.settings.title"),
                     settings.root(),
                     "gui.settings.save",
-                    "material-settings-dialog");
+                    "material-settings-dialog",
+                    null);
         } finally {
             settings.root().disableProperty().unbind();
         }
@@ -1431,7 +1441,7 @@ public final class MainWindow {
         });
         selectCurrentManufacturer(listView, state.manufacturerName());
 
-        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseManufacturer"), content)) {
+        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseManufacturer"), content, listView)) {
             ManufacturerOption selected = listView.getSelectionModel().getSelectedItem();
             if (selected != null) {
                 state = new WizardState(selected.name(), null, null, null, state.target());
@@ -1489,7 +1499,7 @@ public final class MainWindow {
         });
         selectCurrentBoard(listView, state.boardName());
 
-        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseBoard"), content)) {
+        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseBoard"), content, listView)) {
             BoardOption selected = listView.getSelectionModel().getSelectedItem();
             if (selected != null) {
                 state = new WizardState(state.manufacturerName(), selected.name(), null, null, state.target());
@@ -1565,7 +1575,7 @@ public final class MainWindow {
             }
         });
 
-        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseOperatingSystem"), content)) {
+        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseOperatingSystem"), content, treeView)) {
             @Nullable ImageEntry selected = selectedTreeImage(treeView);
             if (selected != null) {
                 selectCatalogImage(selected);
@@ -1680,7 +1690,7 @@ public final class MainWindow {
         });
         selectCurrentFastbootTarget(listView, state.target());
 
-        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseFastbootDevice"), content)) {
+        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseFastbootDevice"), content, listView)) {
             FastbootDevice selected = listView.getSelectionModel().getSelectedItem();
             if (selected != null) {
                 state = new WizardState(
@@ -1742,7 +1752,7 @@ public final class MainWindow {
         });
         selectCurrentBlockTarget(listView, state.target());
 
-        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseStorageDevice"), content)) {
+        if (showSearchableSelectionDialog(Messages.get("gui.dialog.chooseStorageDevice"), content, listView)) {
             BlockDevice selected = listView.getSelectionModel().getSelectedItem();
             if (selected != null) {
                 state = new WizardState(
@@ -1917,7 +1927,8 @@ public final class MainWindow {
                 Messages.get("gui.dialog.confirmFlash.header"),
                 confirmContent,
                 "gui.button.flash",
-                "material-confirm-dialog")) {
+                "material-confirm-dialog",
+                null)) {
             return;
         }
 
@@ -3456,7 +3467,8 @@ public final class MainWindow {
                 messageContent(message),
                 "gui.dialog.ok",
                 styleClass,
-                false);
+                false,
+                null);
 
         if (Platform.isFxApplicationThread()) {
             action.run();
@@ -3472,16 +3484,29 @@ public final class MainWindow {
     /// @param content dialog content.
     /// @return whether the user accepted the dialog.
     private boolean showSelectionDialog(String title, String header, Node content) {
-        return showConfirmationDialog(title, header, content, "gui.dialog.select", "material-selection-dialog");
+        return showConfirmationDialog(
+                title,
+                header,
+                content,
+                "gui.dialog.select",
+                "material-selection-dialog",
+                null);
     }
 
     /// Shows a MaterialFX selection dialog whose header is rendered inside the content area.
     ///
     /// @param title dialog title.
     /// @param content dialog content.
+    /// @param selectionView list or tree view whose items confirm the dialog on double-click.
     /// @return whether the user accepted the dialog.
-    private boolean showSearchableSelectionDialog(String title, Node content) {
-        return showConfirmationDialog(title, "", content, "gui.dialog.select", "material-search-selection-dialog");
+    private boolean showSearchableSelectionDialog(String title, Node content, Control selectionView) {
+        return showConfirmationDialog(
+                title,
+                "",
+                content,
+                "gui.dialog.select",
+                "material-search-selection-dialog",
+                selectionView);
     }
 
     /// Shows a MaterialFX confirmation dialog with custom content.
@@ -3491,14 +3516,24 @@ public final class MainWindow {
     /// @param content dialog content.
     /// @param confirmKey confirm button message key.
     /// @param styleClass dialog style class.
+    /// @param doubleClickSelectionView list or tree view that confirms the dialog when an item is
+    ///        double-clicked, or null to keep confirmation on the confirm button only.
     /// @return whether the user accepted the dialog.
     private boolean showConfirmationDialog(
             String title,
             String header,
             Node content,
             String confirmKey,
-            String styleClass) {
-        return showMaterialDialog(title, header, content, confirmKey, styleClass, true);
+            String styleClass,
+            @Nullable Control doubleClickSelectionView) {
+        return showMaterialDialog(
+                title,
+                header,
+                content,
+                confirmKey,
+                styleClass,
+                true,
+                doubleClickSelectionView);
     }
 
     /// Shows the available application update actions.
@@ -3577,6 +3612,8 @@ public final class MainWindow {
     /// @param confirmKey confirm button message key.
     /// @param styleClass dialog style class.
     /// @param showCancel whether to show a cancel action.
+    /// @param doubleClickSelectionView list or tree view that confirms the dialog when an item is
+    ///        double-clicked, or null to keep confirmation on the confirm button only.
     /// @return whether the user accepted the dialog.
     private boolean showMaterialDialog(
             String title,
@@ -3584,7 +3621,8 @@ public final class MainWindow {
             Node content,
             String confirmKey,
             String styleClass,
-            boolean showCancel) {
+            boolean showCancel,
+            @Nullable Control doubleClickSelectionView) {
         AtomicBoolean accepted = new AtomicBoolean();
         @Nullable MFXButton cancelButton = showCancel
                 ? dialogActionButton("gui.dialog.cancel", "dialog-secondary-button")
@@ -3630,9 +3668,125 @@ public final class MainWindow {
             accepted.set(true);
             dialog.close();
         });
+        if (doubleClickSelectionView != null) {
+            installDoubleClickAccept(doubleClickSelectionView, () -> {
+                accepted.set(true);
+                dialog.close();
+            });
+        }
+        installDialogKeyHandling(dialogContent, dialog::close, () -> {
+            if (!confirmButton.isDisabled()) {
+                accepted.set(true);
+                dialog.close();
+            }
+        });
+        dialog.setOnShown(_ -> requestInitialDialogFocus(content, confirmButton));
         dialog.showAndWait();
         dialog.dispose();
         return accepted.get();
+    }
+
+    /// Installs the Escape and Enter shortcuts of a dialog.
+    ///
+    /// Enter activates the focused button when it is one, so pressing Enter on a focused cancel
+    /// button cancels the dialog instead of confirming it, and pressing Enter on a focused confirm
+    /// button confirms it. Every other focused control, such as a text field or a list view, falls
+    /// back to the dialog's primary action. The activation is performed here rather than left to the
+    /// focused button because JavaFX only maps Enter to buttons on some platforms. Escape always
+    /// cancels.
+    ///
+    /// @param content node that receives the keyboard events.
+    /// @param cancel action performed when Escape is pressed.
+    /// @param confirm action performed when Enter is pressed and the focus is not a button.
+    static void installDialogKeyHandling(Node content, Runnable cancel, Runnable confirm) {
+        content.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+            switch (event.getCode()) {
+                case ESCAPE -> {
+                    event.consume();
+                    cancel.run();
+                }
+                case ENTER -> {
+                    event.consume();
+                    @Nullable Node focusOwner = focusedNode(content);
+                    if (focusOwner instanceof ButtonBase button) {
+                        button.fire();
+                    } else {
+                        confirm.run();
+                    }
+                }
+                default -> {
+                }
+            }
+        });
+    }
+
+    /// Returns the node that currently owns keyboard focus inside a dialog.
+    ///
+    /// @param content dialog content.
+    /// @return focused node, or null when the content is not attached or nothing holds focus.
+    static @Nullable Node focusedNode(Node content) {
+        @Nullable Scene scene = content.getScene();
+        return scene == null ? null : scene.getFocusOwner();
+    }
+
+    /// Moves keyboard focus into a dialog when it is shown.
+    ///
+    /// @param content dialog content.
+    /// @param fallback node that receives the focus when the content has no search field.
+    private static void requestInitialDialogFocus(Node content, Node fallback) {
+        @Nullable Node searchField = content.lookup(".selection-search");
+        (searchField == null ? fallback : searchField).requestFocus();
+    }
+
+    /// Accepts a selection dialog when one of its items is double-clicked.
+    ///
+    /// The dialog buttons keep their behavior; double-clicking a selectable cell only performs the
+    /// same confirmation as the primary action button. The handler is registered as an event
+    /// filter so that list skins which consume mouse clicks cannot swallow the gesture.
+    ///
+    /// @param selectionView selection list or tree view.
+    /// @param accept action that accepts and closes the dialog.
+    private static void installDoubleClickAccept(Control selectionView, Runnable accept) {
+        selectionView.addEventFilter(MouseEvent.MOUSE_CLICKED, event -> {
+            if (event.getButton() == MouseButton.PRIMARY
+                    && event.getClickCount() == 2
+                    && selectableCell(event.getTarget()) != null) {
+                accept.run();
+            }
+        });
+    }
+
+    /// Finds the selectable list or tree cell that contains a mouse event target.
+    ///
+    /// @param target mouse event target.
+    /// @return containing selection cell, or null when the event did not hit a selectable item.
+    private static @Nullable Cell<?> selectableCell(@Nullable Object target) {
+        Node node = target instanceof Node eventNode ? eventNode : null;
+        while (node != null) {
+            if (node instanceof Cell<?> cell) {
+                return isSelectableCell(cell) ? cell : null;
+            }
+            node = node.getParent();
+        }
+        return null;
+    }
+
+    /// Returns whether a cell represents an item that a double-click may confirm.
+    ///
+    /// Tree category nodes are not selectable, so double-clicking a category does not close the
+    /// operating system dialog without a choice.
+    ///
+    /// @param cell list or tree cell.
+    /// @return whether a double-clicked cell should confirm the dialog.
+    private static boolean isSelectableCell(Cell<?> cell) {
+        if (cell.isEmpty()) {
+            return false;
+        }
+        if (cell instanceof TreeCell<?> treeCell) {
+            @Nullable TreeItem<?> item = treeCell.getTreeItem();
+            return item != null && item.isLeaf();
+        }
+        return true;
     }
 
     /// Creates a MaterialFX dialog button.
