@@ -16,6 +16,7 @@ import org.glavo.ruyi.imager.core.fastboot.FastbootDevice;
 import org.glavo.ruyi.imager.core.fastboot.FastbootFlashResult;
 import org.glavo.ruyi.imager.core.fastboot.FastbootService;
 import org.glavo.ruyi.imager.core.flash.BlockDevicePreparer;
+import org.glavo.ruyi.imager.core.flash.FlashService;
 import org.glavo.ruyi.imager.core.flash.LocalFlashService;
 import org.glavo.ruyi.imager.core.flash.ProcessDdImageWriter;
 import org.glavo.ruyi.imager.core.image.ImageCatalog;
@@ -40,6 +41,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.reflect.Proxy;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -70,6 +72,86 @@ public final class CliApplicationTest {
     /// JSON mapper used to inspect CLI output.
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /// Shows command-specific help without invoking services, even when required arguments are absent.
+    ///
+    /// @param command command path, or empty for root help.
+    /// @param directory isolated application directory.
+    @ParameterizedTest
+    @ValueSource(strings = {"", "repo", "repo update", "image", "image list", "image download", "device", "device list", "flash"})
+    public void showsHelpForEveryCommand(String command, @TempDir Path directory) {
+        AppServices services = new AppServices(
+                new AppDirectories(directory.resolve("config"), directory.resolve("cache")),
+                rejectingService(RepositoryService.class), rejectingService(ImageCatalogService.class),
+                rejectingService(BlockDeviceService.class), rejectingService(FastbootService.class),
+                rejectingService(FlashService.class));
+        for (String flag : List.of("-h", "--help")) {
+            String[] args = (command.isEmpty() ? flag : command + " " + flag).split(" ");
+            CliResult result = runCli(services, args);
+            assertEquals(0, result.exitCode(), result.stderr());
+            assertEquals("", result.stderr());
+            assertTrue(result.stdout().startsWith("Usage: ruyi-imager-cli" + (command.isEmpty() ? " " : " " + command + " ")),
+                    result.stdout());
+            assertTrue(result.stdout().contains("--help"), result.stdout());
+        }
+    }
+
+    /// Reports missing subcommands as usage errors rather than successful operations.
+    ///
+    /// @param command command group, or empty for the CLI root.
+    /// @param directory isolated application directory.
+    @ParameterizedTest
+    @ValueSource(strings = {"", "repo", "image", "device"})
+    public void rejectsMissingSubcommands(String command, @TempDir Path directory) {
+        CliResult result = runCli(services(directory, List.of()), command.isEmpty() ? new String[0] : new String[]{command});
+        assertEquals(2, result.exitCode());
+        assertEquals("", result.stdout());
+        assertTrue(result.stderr().startsWith("Usage: ruyi-imager-cli" + (command.isEmpty() ? " " : " " + command + " ")),
+                result.stderr());
+    }
+
+    /// Keeps unknown commands and options invalid when help or version output is requested.
+    ///
+    /// @param command invalid argument sequence.
+    /// @param directory isolated application directory.
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "nonsense", "nonsense --help", "--help nonsense", "nonsense -h", "nonsense --version",
+            "--unknown --help", "--help --unknown", "repo nonsense --help", "repo --help nonsense",
+            "image list --unknown --help", "image list --help --unknown", "flash --unknown --help",
+            "--unknown image list --help", "repo --unknown update --help", "--help -- nonsense"
+    })
+    public void rejectsUnknownArgumentsWithHelp(String command, @TempDir Path directory) {
+        CliResult result = runCli(services(directory, List.of()), command.split(" "));
+        assertEquals(2, result.exitCode(), result.stdout() + result.stderr());
+        assertEquals("", result.stdout());
+        assertTrue(!result.stderr().isBlank());
+    }
+
+    /// Keeps explicit root version requests successful.
+    ///
+    /// @param flag version option alias.
+    /// @param directory isolated application directory.
+    @ParameterizedTest
+    @ValueSource(strings = {"-V", "--version"})
+    public void printsVersion(String flag, @TempDir Path directory) {
+        CliResult result = runCli(services(directory, List.of()), flag);
+        assertEquals(0, result.exitCode(), result.stderr());
+        assertEquals(BuildInfo.current().version(), result.stdout().strip());
+        assertEquals("", result.stderr());
+    }
+
+    /// Creates a service that fails the test if command execution reaches it.
+    ///
+    /// @param type service interface.
+    /// @param <T> service type.
+    /// @return rejecting service proxy.
+    private static <T> T rejectingService(Class<T> type) {
+        return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                (proxy, method, args) -> {
+                    throw new AssertionError("Help must not invoke " + method);
+                }));
+    }
+
     /// Registers application update commands only in builds that enable them, retaining repository updates.
     ///
     /// @param directory isolated application directory.
@@ -80,6 +162,15 @@ public final class CliApplicationTest {
         CliResult help = runCli(services, "--help");
         assertEquals(0, help.exitCode(), help.stderr());
         assertEquals(BuildInfo.current().applicationUpdatesEnabled(), help.stdout().contains("check-update"));
+        for (String flag : List.of("-h", "--help")) {
+            CliResult updateHelp = runCli(services, "check-update", flag);
+            assertEquals(BuildInfo.current().applicationUpdatesEnabled() ? 0 : 2, updateHelp.exitCode(),
+                    updateHelp.stdout() + updateHelp.stderr());
+            if (BuildInfo.current().applicationUpdatesEnabled()) {
+                assertTrue(updateHelp.stdout().startsWith("Usage: ruyi-imager-cli check-update "), updateHelp.stdout());
+                assertEquals("", updateHelp.stderr());
+            }
+        }
         Path manifest = directory.resolve("update.json");
         Files.writeString(manifest, "{\"schemaVersion\":1,\"releases\":[]}");
         CliResult update = runCli(services, "check-update", "--source", manifest.toString());

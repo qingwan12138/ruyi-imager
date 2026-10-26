@@ -63,7 +63,7 @@ import org.slf4j.LoggerFactory;
         name = "ruyi-imager-cli",
         description = "Flash Ruyi images from a CLI or GUI.")
 @NotNullByDefault
-public final class CliApplication implements Runnable {
+public final class CliApplication implements Callable<Integer> {
     /// Logger for CLI command execution.
     private static final Logger LOGGER = LoggerFactory.getLogger(CliApplication.class);
 
@@ -75,6 +75,7 @@ public final class CliApplication implements Runnable {
     @Option(
             names = {"-h", "--help"},
             usageHelp = true,
+            scope = ScopeType.INHERIT,
             description = "Show this help message and exit.",
             descriptionKey = "cli.option.help")
     private boolean usageHelp;
@@ -141,12 +142,28 @@ public final class CliApplication implements Runnable {
             }
             localizeCommands(commandLine);
             configureOutput(commandLine);
+            commandLine.setExecutionStrategy(CliApplication::executeCommand);
             int exitCode = commandLine.execute(args);
             LOGGER.atInfo().log(() -> "CLI command finished. exitCode=" + exitCode);
             return exitCode;
         } finally {
             RuyiLogging.shutdown();
         }
+    }
+
+    /// Rejects unmatched arguments before handling help or executing the selected command.
+    ///
+    /// @param parseResult parsed command hierarchy.
+    /// @return command exit code, including zero for an explicit help request.
+    /// @throws CommandLine.UnmatchedArgumentException when any command has unrecognized arguments.
+    /// @throws CommandLine.ExecutionException when command execution fails.
+    private static int executeCommand(CommandLine.ParseResult parseResult) {
+        for (@Nullable CommandLine.ParseResult current = parseResult; current != null; current = current.subcommand()) {
+            if (!current.unmatched().isEmpty()) {
+                throw new CommandLine.UnmatchedArgumentException(current.commandSpec().commandLine(), current.unmatched());
+            }
+        }
+        return new CommandLine.RunLast().execute(parseResult);
     }
 
     /// Aligns Picocli usage output with the charset used by the standard streams.
@@ -176,10 +193,12 @@ public final class CliApplication implements Runnable {
         }
     }
 
-    /// Prints root usage when no CLI subcommand was selected.
+    /// Prints root usage to standard error when no CLI subcommand was selected.
+    ///
+    /// @return the usage-error exit code.
     @Override
-    public void run() {
-        printUsage(spec);
+    public Integer call() {
+        return printMissingSubcommandUsage(spec);
     }
 
     /// Builds the repository command group.
@@ -213,14 +232,16 @@ public final class CliApplication implements Runnable {
         return commandLine;
     }
 
-    /// Prints usage for a command specification.
+    /// Prints usage to standard error for a command missing a subcommand.
     ///
     /// @param spec command specification.
-    private static void printUsage(@Nullable CommandSpec spec) {
+    /// @return the usage-error exit code.
+    private static int printMissingSubcommandUsage(@Nullable CommandSpec spec) {
         if (spec != null) {
             CommandLine commandLine = spec.commandLine();
-            commandLine.usage(commandLine.getOut());
+            commandLine.usage(commandLine.getErr());
         }
+        return CommandLine.ExitCode.USAGE;
     }
 
     /// Checks a local or HTTPS update manifest for a newer compatible application build.
@@ -231,14 +252,6 @@ public final class CliApplication implements Runnable {
     private static final class CheckUpdateCommand implements Callable<Integer> {
         /// Shared application services.
         private final AppServices services;
-
-        /// Whether usage help should be displayed.
-        @Option(
-                names = {"-h", "--help"},
-                usageHelp = true,
-                description = "Show this help message and exit.",
-                descriptionKey = "cli.option.help")
-        private boolean usageHelp;
 
         /// Optional local path or HTTPS update manifest URL.
         @Option(
@@ -519,15 +532,17 @@ public final class CliApplication implements Runnable {
     /// Command group for repository operations.
     @Command(name = "repo", description = "Manage Ruyi metadata repositories.")
     @NotNullByDefault
-    private static final class RepoCommand implements Runnable {
+    private static final class RepoCommand implements Callable<Integer> {
         /// Picocli command specification injected at runtime.
         @Spec
         private @Nullable CommandSpec spec;
 
-        /// Prints repository command usage.
+        /// Prints repository command usage to standard error.
+        ///
+        /// @return the usage-error exit code.
         @Override
-        public void run() {
-            printUsage(spec);
+        public Integer call() {
+            return printMissingSubcommandUsage(spec);
         }
     }
 
@@ -569,15 +584,17 @@ public final class CliApplication implements Runnable {
     /// Command group for image operations.
     @Command(name = "image", description = "List and download Ruyi images.")
     @NotNullByDefault
-    private static final class ImageCommand implements Runnable {
+    private static final class ImageCommand implements Callable<Integer> {
         /// Picocli command specification injected at runtime.
         @Spec
         private @Nullable CommandSpec spec;
 
-        /// Prints image command usage.
+        /// Prints image command usage to standard error.
+        ///
+        /// @return the usage-error exit code.
         @Override
-        public void run() {
-            printUsage(spec);
+        public Integer call() {
+            return printMissingSubcommandUsage(spec);
         }
     }
 
@@ -697,15 +714,17 @@ public final class CliApplication implements Runnable {
     /// Command group for block device operations.
     @Command(name = "device", description = "Inspect writable target devices.")
     @NotNullByDefault
-    private static final class DeviceCommand implements Runnable {
+    private static final class DeviceCommand implements Callable<Integer> {
         /// Picocli command specification injected at runtime.
         @Spec
         private @Nullable CommandSpec spec;
 
-        /// Prints device command usage.
+        /// Prints device command usage to standard error.
+        ///
+        /// @return the usage-error exit code.
         @Override
-        public void run() {
-            printUsage(spec);
+        public Integer call() {
+            return printMissingSubcommandUsage(spec);
         }
     }
 
