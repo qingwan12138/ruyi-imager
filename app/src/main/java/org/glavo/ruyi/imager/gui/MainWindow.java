@@ -867,13 +867,18 @@ public final class MainWindow {
 
     /// Wraps a selection list with a search field.
     ///
+    /// Filtering keeps the item the user chose when it is still visible and clears the selection
+    /// otherwise. The selection is captured before the predicate changes, because the selection
+    /// model adjusts to the rebuilt item list synchronously and would otherwise report the item
+    /// that happened to land on the selected index.
+    ///
     /// @param header header text.
     /// @param listView selection list view.
     /// @param items source items.
     /// @param matcher item matcher receiving a normalized query.
     /// @param <T> item type.
     /// @return searchable selection content.
-    private static <T> Node searchableSelectionContent(
+    static <T> Node searchableSelectionContent(
             String header,
             ListView<T> listView,
             List<T> items,
@@ -884,11 +889,14 @@ public final class MainWindow {
         listView.setItems(filteredItems);
         searchField.textProperty().addListener((_, _, value) -> {
             String query = normalizeSearchQuery(value);
-            filteredItems.setPredicate(item -> query.isEmpty() || matcher.test(item, query));
-            // Filtering never selects an item on the user's behalf; it only drops a selection that
-            // the query hid, so the dialog cannot confirm an item that is no longer visible.
             @Nullable T selected = listView.getSelectionModel().getSelectedItem();
-            if (selected != null && !filteredItems.contains(selected)) {
+            filteredItems.setPredicate(item -> query.isEmpty() || matcher.test(item, query));
+            // Filtering never selects an item on the user's behalf: it either restores the item the
+            // user chose or drops the selection, so the dialog cannot confirm a hidden item or one
+            // that the rebuild pushed onto the selected index.
+            if (selected != null && filteredItems.contains(selected)) {
+                listView.getSelectionModel().select(selected);
+            } else {
                 listView.getSelectionModel().clearSelection();
             }
         });

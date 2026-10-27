@@ -421,6 +421,41 @@ public final class MainWindowJavaFxSmokeTest {
         });
     }
 
+    /// Verifies that filtering a selection list never selects an item on the user's behalf.
+    ///
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void keepsListSelectionIndependentOfFiltering() throws Exception {
+        runOnJavaFxThread(() -> {
+            ListView<String> listView = new ListView<>();
+            Node content = MainWindow.searchableSelectionContent(
+                    "Choose",
+                    listView,
+                    List.of("alpha", "beta", "gamma"),
+                    (item, query) -> item.contains(query));
+            VBox contentBox = assertInstanceOf(VBox.class, content);
+            HBox headerRow = assertInstanceOf(HBox.class, contentBox.getChildren().get(0));
+            TextField searchField = assertInstanceOf(
+                    TextField.class,
+                    headerRow.getChildren().get(headerRow.getChildren().size() - 1));
+
+            // Filtering must not hand the selection to whatever lands on the selected index.
+            listView.getSelectionModel().select("alpha");
+            searchField.setText("beta");
+            assertNull(listView.getSelectionModel().getSelectedItem());
+
+            // A selection that stays visible survives filtering.
+            listView.getSelectionModel().select("beta");
+            searchField.setText("bet");
+            assertEquals("beta", listView.getSelectionModel().getSelectedItem());
+
+            // Clearing the filter restores the chosen item instead of selecting another one.
+            searchField.setText("");
+            assertEquals("beta", listView.getSelectionModel().getSelectedItem());
+            return null;
+        });
+    }
+
     /// Creates a key-pressed event for dialog shortcut tests.
     ///
     /// @param code key code.
