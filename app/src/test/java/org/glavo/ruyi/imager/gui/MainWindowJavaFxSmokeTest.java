@@ -254,7 +254,7 @@ public final class MainWindowJavaFxSmokeTest {
         });
     }
 
-    /// Verifies that the operating-system tree can filter, select leaves, and resolve a selected category.
+    /// Verifies that the operating-system tree filters images and never treats a category as a selection.
     ///
     /// @throws Exception when JavaFX execution fails.
     @Test
@@ -290,16 +290,34 @@ public final class MainWindowJavaFxSmokeTest {
                 TreeItem<MainWindow.OperatingSystemTreeNode> root = treeView.getRoot();
                 assertNotNull(root);
                 assertEquals(1, root.getChildren().size());
-                TreeItem<MainWindow.OperatingSystemTreeNode> category = root.getChildren().getFirst();
-                assertEquals("Ubuntu", category.getValue().name());
+                assertEquals("Ubuntu", root.getChildren().getFirst().getValue().name());
 
-                // Filtering must not select anything by itself, and a category is not a choice.
+                // Filtering must not select anything by itself.
+                assertNull(treeView.getSelectionModel().getSelectedItem());
                 assertNull(MainWindow.selectedTreeImage(treeView));
 
-                treeView.getSelectionModel().select(category);
+                // Re-filtering must not bring back the image the dialog opened with.
+                searchField.setText("revyos");
+                assertNull(treeView.getSelectionModel().getSelectedItem());
                 assertNull(MainWindow.selectedTreeImage(treeView));
 
-                TreeItem<MainWindow.OperatingSystemTreeNode> imageItem = category.getChildren().getFirst();
+                // A category is not a choice, so selecting one keeps the dialog unconfirmable.
+                searchField.setText("");
+                root = treeView.getRoot();
+                assertNotNull(root);
+                @Nullable TreeItem<MainWindow.OperatingSystemTreeNode> ubuntuCategory = null;
+                for (TreeItem<MainWindow.OperatingSystemTreeNode> categoryItem : root.getChildren()) {
+                    if ("Ubuntu".equals(categoryItem.getValue().name())) {
+                        ubuntuCategory = categoryItem;
+                        break;
+                    }
+                }
+                assertNotNull(ubuntuCategory);
+
+                treeView.getSelectionModel().select(ubuntuCategory);
+                assertNull(MainWindow.selectedTreeImage(treeView));
+
+                TreeItem<MainWindow.OperatingSystemTreeNode> imageItem = ubuntuCategory.getChildren().getFirst();
                 treeView.getSelectionModel().select(imageItem);
                 @Nullable ImageEntry selected = MainWindow.selectedTreeImage(treeView);
                 assertNotNull(selected);
@@ -359,6 +377,7 @@ public final class MainWindowJavaFxSmokeTest {
             assertFalse(treeConfirm.get());
 
             MainWindow.operatingSystemSelectionContent("Choose OS", treeView, manyImages(), null);
+            assertNull(treeView.getSelectionModel().getSelectedItem());
             assertFalse(treeConfirm.get());
 
             TreeItem<MainWindow.OperatingSystemTreeNode> category = treeView.getRoot().getChildren().getFirst();
@@ -367,6 +386,37 @@ public final class MainWindowJavaFxSmokeTest {
 
             treeView.getSelectionModel().select(category.getChildren().getFirst());
             assertTrue(treeConfirm.get());
+            return null;
+        });
+    }
+
+    /// Verifies that the partition dialog cannot be confirmed until every partition has a target.
+    ///
+    /// @param temporaryDirectory temporary application directory.
+    /// @throws Exception when JavaFX execution fails.
+    @Test
+    public void requiresEveryPartitionTargetBeforeConfirming(@TempDir Path temporaryDirectory) throws Exception {
+        runOnJavaFxThread(() -> {
+            BlockDevice boot = blockDevice("boot", temporaryDirectory.resolve("boot.raw"));
+            BlockDevice root = blockDevice("root", temporaryDirectory.resolve("root.raw"));
+
+            MFXComboBox<BlockDevice> bootSelector = new MFXComboBox<>();
+            bootSelector.getItems().setAll(List.of(boot, root));
+            MFXComboBox<BlockDevice> rootSelector = new MFXComboBox<>();
+            rootSelector.getItems().setAll(List.of(boot, root));
+
+            LinkedHashMap<String, MFXComboBox<BlockDevice>> selectors = new LinkedHashMap<>();
+            selectors.put("boot", bootSelector);
+            selectors.put("root", rootSelector);
+
+            BooleanBinding ready = MainWindow.partitionSelectorsReady(selectors);
+            assertFalse(ready.get());
+
+            bootSelector.setValue(boot);
+            assertFalse(ready.get());
+
+            rootSelector.setValue(root);
+            assertTrue(ready.get());
             return null;
         });
     }

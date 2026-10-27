@@ -7,6 +7,7 @@ import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.beans.Observable;
 import javafx.beans.binding.Bindings;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.property.BooleanProperty;
@@ -907,8 +908,10 @@ public final class MainWindow {
 
     /// Returns whether the current selection of a list or tree view can be confirmed.
     ///
+    /// A tree category only groups images, so selecting one does not make the dialog confirmable.
+    ///
     /// @param selectionView selection list or tree view.
-    /// @return binding that is true while an item is selected.
+    /// @return binding that is true while a confirmable item is selected.
     static BooleanBinding selectionCanConfirm(Control selectionView) {
         if (selectionView instanceof ListView<?> listView) {
             return listView.getSelectionModel().selectedItemProperty().isNull().not();
@@ -1032,12 +1035,9 @@ public final class MainWindow {
         BooleanProperty treeEmpty = new SimpleBooleanProperty();
         Runnable refreshTree = () -> {
             String query = normalizeSearchQuery(searchField.getText());
-            @Nullable ImageEntry selected = selectedTreeImage(treeView);
-            populateOperatingSystemTree(
-                    treeView,
-                    images,
-                    query,
-                    selected == null ? currentImage : selected);
+            // Only the initial population restores the current image. Later refreshes keep whatever
+            // the user selected, so filtering never brings back an image the filter hid.
+            populateOperatingSystemTree(treeView, images, query, selectedTreeImage(treeView));
             treeEmpty.set(treeView.getRoot() == null || treeView.getRoot().getChildren().isEmpty());
         };
 
@@ -1115,7 +1115,7 @@ public final class MainWindow {
     /// Returns the selected image from an operating system tree.
     ///
     /// @param treeView operating system tree view.
-    /// @return selected image, first image under a selected category, or null when the tree is empty.
+    /// @return selected image, or null when nothing is selected or the selection is a category.
     static @Nullable ImageEntry selectedTreeImage(TreeView<OperatingSystemTreeNode> treeView) {
         @Nullable TreeItem<OperatingSystemTreeNode> selectedItem =
                 treeView.getSelectionModel().getSelectedItem();
@@ -1901,7 +1901,8 @@ public final class MainWindow {
         if (showSelectionDialog(
                 Messages.get("gui.dialog.choosePartitionStorageDevice"),
                 Messages.get("gui.dialog.choosePartitionStorageDevice.header"),
-                content)) {
+                content,
+                partitionSelectorsReady(selectors))) {
             @Nullable FlashTarget selectedTarget = partitionTargetSelection(selectors);
             if (selectedTarget != null) {
                 state = new WizardState(
@@ -1913,6 +1914,22 @@ public final class MainWindow {
                 refreshState();
             }
         }
+    }
+
+    /// Returns whether every partition selector has a target.
+    ///
+    /// The partition dialog stays unconfirmable while a partition is unset, so accepting it always
+    /// produces a complete target map instead of closing on an incomplete one.
+    ///
+    /// @param selectors partition selectors.
+    /// @return binding that is true while every partition has a target.
+    static BooleanBinding partitionSelectorsReady(
+            @Unmodifiable Map<String, MFXComboBox<BlockDevice>> selectors) {
+        return Bindings.createBooleanBinding(
+                () -> selectors.values().stream().allMatch(selector -> selector.getValue() != null),
+                selectors.values().stream()
+                        .map(MFXComboBox::valueProperty)
+                        .toArray(Observable[]::new));
     }
 
     /// Builds a flash target from partition selector values.
@@ -3546,8 +3563,14 @@ public final class MainWindow {
     /// @param title dialog title.
     /// @param header dialog header.
     /// @param content dialog content.
+    /// @param canConfirm whether the dialog can be confirmed, or null when the content has no
+    ///        selection to satisfy.
     /// @return whether the user accepted the dialog.
-    private boolean showSelectionDialog(String title, String header, Node content) {
+    private boolean showSelectionDialog(
+            String title,
+            String header,
+            Node content,
+            @Nullable ObservableBooleanValue canConfirm) {
         return showConfirmationDialog(
                 title,
                 header,
@@ -3555,7 +3578,7 @@ public final class MainWindow {
                 "gui.dialog.select",
                 "material-selection-dialog",
                 null,
-                null);
+                canConfirm);
     }
 
     /// Shows a MaterialFX selection dialog whose header is rendered inside the content area.
