@@ -14,7 +14,7 @@ download-plugin = "5.7.0"
 wrapper-neo = "0.2.0"
 
 # Bundled archives also require matching checksums and sizes in app/build.gradle.kts.
-liberica = "25.0.5+11"
+liberica = "25.0.5.0.3+5"
 riscv64-javafx = "25.0.4"
 platform-tools = "37.0.1"
 

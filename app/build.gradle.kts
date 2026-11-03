@@ -928,19 +928,19 @@ fun libericaJdkBundle(platform: String, version: String): JlinkJdkBundle {
     val executableName = if (platform.startsWith("windows-")) "jlink.exe" else "jlink"
     val (sha256, sizeBytes) = when (platform) {
         "windows-x86_64" ->
-            "a1ba9ee63b347f612bb964ac1be28a274788b0a8e1a3aca82f4d69614af6e9c5" to 347_963_841L
+            "80ade5141e02d802e155e41db91cd6af7db1e9b09ad18bdf1184d7adacaa5a1a" to 347_975_100L
         "windows-aarch64" ->
-            "6acc29b889eeea0ffcc4a3c6d9c07b50f3d85aaa16e49e1a5c55dedea2e2160f" to 230_726_054L
+            "de0c015cddebece2f09c3e38efd6ec2e3323cf8722f44c1b7e800947427e6541" to 230_735_410L
         "macos-x86_64" ->
-            "55c0985b92d9142c64569756365c657dd58a4db98ed6d98a290fe539a5243038" to 354_580_655L
+            "21ce6d039f7fd228695dc503937de6e52a5d9377517c13faf55d622af7970946" to 354_588_245L
         "macos-aarch64" ->
-            "6651515a2f0c19f2018f47ec98dd5305288e4b1a6f24ba8dd2753b314eeb35d0" to 348_507_414L
+            "fc9ed889cb431c9c400bc1e014b01dadc88a7cba83992367673879f95b6b98ac" to 348_521_606L
         "linux-x86_64" ->
-            "aac10c6aff7bc47453c1cafeec9fb0c0153dac572afa910a5d2d751f3b32afd0" to 377_293_270L
+            "7fc9f107c456c60b5b1afbdf4ed413ca92d42690ed56ed26166efed11620f454" to 377_287_742L
         "linux-aarch64" ->
-            "b1872d62d5abe58c22296bcd659f061266c8e087fb3c14ea44a52a3916f4798f" to 371_803_716L
+            "2a32560f8d4ab333f8cc81aa8435dbafbe31a1f73e05db9be0747f6da6cb6b31" to 371_806_964L
         "linux-riscv64" ->
-            "6993a12090e7bf1f2669269c058be9c8d51987e1a7de1507d5ebb5f0e0c70093" to 205_036_324L
+            "b66c065150ac1b0451ad6fd44a8dfa5695e322eb17c2f2a1e50da723a34fd9ab" to 205_040_562L
         else -> error("Unsupported jlink target platform: $platform")
     }
     return JlinkJdkBundle(
