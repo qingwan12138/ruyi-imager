@@ -17,6 +17,11 @@ dependencies {
     implementation(libs.kala.compress.zstandard)
     implementation(libs.tomlj)
 
+    constraints {
+        implementation(libs.commons.codec)
+        implementation(libs.zstd.jni)
+    }
+
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
