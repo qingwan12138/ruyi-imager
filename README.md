@@ -1,4 +1,8 @@
-# Ruyi Imager
+<div align="center">
+<img alt="RuyiSDK Logo" src="resources/ruyi-logo-256.png" height="128" />
+<h3>Ruyi Imager</h3>
+<p>The system image flashing tool for <a href="https://ruyisdk.org/en/">RuyiSDK</a>.</p>
+</div>
 
 Ruyi Imager is a desktop image writer for RISC-V boards supported by the [RuyiSDK ecosystem](https://github.com/ruyisdk/ruyi).
 
