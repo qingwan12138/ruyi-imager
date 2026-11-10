@@ -25,7 +25,7 @@ env:
     --enable-native-access=ALL-UNNAMED
     --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
     --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
-  WIX_VERSION: 6.0.2
+  WIX_VERSION: 7.0.1
 
 jobs:
   version:
@@ -199,6 +199,7 @@ jobs:
         if: startsWith(matrix.platform, 'windows-')
         run: |
           dotnet tool install --tool-path "$env:RUNNER_TEMP\wix" wix --version "$env:WIX_VERSION"
+          & "$env:RUNNER_TEMP\wix\wix.exe" eula accept wix7
           & "$env:RUNNER_TEMP\wix\wix.exe" extension add --global "WixToolset.UI.wixext/$env:WIX_VERSION"
           & "$env:RUNNER_TEMP\wix\wix.exe" extension add --global "WixToolset.BootstrapperApplications.wixext/$env:WIX_VERSION"
           "$env:RUNNER_TEMP\wix" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
