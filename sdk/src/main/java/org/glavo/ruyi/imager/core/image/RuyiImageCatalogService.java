@@ -23,8 +23,12 @@ import org.tomlj.TomlParseResult;
 import org.tomlj.TomlTable;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -172,6 +176,139 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     /// @throws IOException when the download directory cannot be prepared.
     @Override
     public Path downloadImage(ImageEntry image, ProgressReporter reporter) throws IOException {
+        Path directory = downloadDirectory(image);
+        Files.createDirectories(directory);
+        try (var channel = FileChannel.open(directory.resolveSibling(directory.getFileName() + ".lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             var lock = lockCache(channel)) {
+            return downloadAndMaterialize(image, reporter);
+        }
+    }
+
+    /// Imports files under the same cross-process lock used by download and materialization.
+    @Override
+    public @Unmodifiable List<RuyiDistfile> prepareLocalImage(
+            ImageEntry image, List<Path> sources, boolean allowDownload, ProgressReporter reporter) throws IOException {
+        for (ImageComponent component : image.components()) {
+            if (!ProvisionStrategies.canCombine(image.strategy(), component.strategy())) {
+                throw new IOException(SdkMessages.get("core.flash.unsupportedStrategy", component.strategy()));
+            }
+            if (ProvisionStrategies.isFastboot(component.strategy())) {
+                @Nullable String error = ProvisionStrategies.fastbootPartitionError(component.strategy(), component.partitionMap().keySet());
+                if (error != null) {
+                    throw new IOException(error);
+                }
+            }
+        }
+        Path directory = downloadDirectory(image);
+        Files.createDirectories(directory);
+        try (var channel = FileChannel.open(directory.resolveSibling(directory.getFileName() + ".lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             var lock = lockCache(channel)) {
+            Set<RuyiDistfile> imported = new HashSet<>();
+            for (Path source : sources) {
+                imported.addAll(importLocalFile(image, source, directory, reporter));
+            }
+            List<RuyiDistfile> missing = new ArrayList<>();
+            List<Path> verifiedFiles = new ArrayList<>();
+            for (RuyiDistfile file : image.distfiles()) {
+                DistfileIntegrity.checkInterrupted();
+                Path cached = directory.resolve(file.name());
+                if (imported.contains(file)
+                        || (DistfileIntegrity.hasSupportedChecksum(file) && DistfileIntegrity.verify(cached, file))) {
+                    verifiedFiles.add(cached);
+                } else if (allowDownload) {
+                    if (!DistfileIntegrity.hasSupportedChecksum(file)) {
+                        throw new IOException(SdkMessages.get("core.download.noSupportedChecksum", file.name()));
+                    }
+                    verifiedFiles.add(downloader.download(file, directory, reporter));
+                } else {
+                    missing.add(file);
+                }
+            }
+            if (!missing.isEmpty()) {
+                return List.copyOf(missing);
+            }
+            Path prepared = materialize(image, verifiedFiles, reporter);
+            for (String relative : image.partitionMap().values()) {
+                Path partition = Files.isDirectory(prepared) ? prepared.resolve(relative) : prepared;
+                if (Files.size(partition) == 0) {
+                    throw new IOException(SdkMessages.get("core.flash.emptyImage", partition));
+                }
+            }
+            DistfileIntegrity.checkInterrupted();
+            return List.of();
+        }
+    }
+
+    /// Acquires an exclusive cache lock, failing rather than racing another operation.
+    private static FileLock lockCache(FileChannel channel) throws IOException {
+        try {
+            @Nullable FileLock lock = channel.tryLock();
+            if (lock != null) {
+                return lock;
+            }
+        } catch (OverlappingFileLockException e) {
+            throw new IOException(SdkMessages.get("core.local.cacheBusy"), e);
+        }
+        throw new IOException(SdkMessages.get("core.local.cacheBusy"));
+    }
+
+    /// Copies into isolated staging before identifying and publishing matching cache entries.
+    private static @Unmodifiable List<RuyiDistfile> importLocalFile(
+            ImageEntry image, Path source, Path directory, ProgressReporter reporter) throws IOException {
+        long size = Files.size(source);
+        if (size == 0 || image.distfiles().stream().noneMatch(file ->
+                DistfileIntegrity.hasSupportedChecksum(file)
+                        && (file.sizeBytes() == null || file.sizeBytes() == size))) {
+            throw new IOException(SdkMessages.get("core.local.noMatch", source));
+        }
+        Path staging = Files.createTempFile(directory, ".import-", ".tmp");
+        try {
+            DistfileIntegrity.Fingerprint fingerprint;
+            try (var output = Files.newOutputStream(staging)) {
+                fingerprint = DistfileIntegrity.read(source, output, reporter, image.distfiles());
+            }
+            @Unmodifiable List<RuyiDistfile> matches = image.distfiles().stream()
+                    .filter(DistfileIntegrity::hasSupportedChecksum)
+                    .filter(file -> fingerprint.size() > 0 && DistfileIntegrity.matches(fingerprint, file)).toList();
+            if (matches.isEmpty()) {
+                throw new IOException(SdkMessages.get("core.local.noMatch", source));
+            }
+            for (int i = 0; i < matches.size(); i++) {
+                RuyiDistfile file = matches.get(i);
+                DistfileIntegrity.checkInterrupted();
+                Path target = directory.resolve(file.name());
+                if (Files.exists(target)) {
+                    if (!DistfileIntegrity.verify(target, file)) {
+                        throw new IOException(SdkMessages.get("core.local.cacheConflict", target));
+                    }
+                    continue;
+                }
+                if (i == matches.size() - 1) {
+                    Files.move(staging, target);
+                    continue;
+                }
+                Path publication = Files.createTempFile(directory, ".import-", ".tmp");
+                try {
+                    try (var output = Files.newOutputStream(publication)) {
+                        var copied = DistfileIntegrity.read(staging, output, reporter, List.of(file));
+                        if (!DistfileIntegrity.matches(copied, file)) {
+                            throw new IOException(SdkMessages.get("core.local.changed", source));
+                        }
+                    }
+                    DistfileIntegrity.checkInterrupted();
+                    Files.move(publication, target);
+                } finally {
+                    Files.deleteIfExists(publication);
+                }
+            }
+            return matches;
+        } finally {
+            Files.deleteIfExists(staging);
+        }
+    }
+
+    /// Downloads and materializes an image while the caller holds its cache lock.
+    private Path downloadAndMaterialize(ImageEntry image, ProgressReporter reporter) throws IOException {
         if (image.distfiles().isEmpty()) {
             LOGGER.atWarn().log(() -> "Image has no distfiles. atom=" + image.atom());
             throw new IOException(SdkMessages.get("core.download.imageNoDistfiles", image.atom()));
@@ -190,7 +327,11 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         for (RuyiDistfile distfile : image.distfiles()) {
             downloadedDistfiles.add(downloader.download(distfile, downloadDirectory, reporter));
         }
+        return materialize(image, downloadedDistfiles, reporter);
+    }
 
+    /// Prepares verified distfiles in declaration order while the image cache is locked.
+    private Path materialize(ImageEntry image, List<Path> downloadedDistfiles, ProgressReporter reporter) throws IOException {
         Path artifactDirectory = directories.cacheDirectory()
                 .resolve("artifacts")
                 .resolve(image.repoId())

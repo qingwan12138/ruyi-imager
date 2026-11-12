@@ -4,6 +4,9 @@
 package org.glavo.ruyi.imager.core.image;
 
 import org.glavo.ruyi.imager.core.ProgressReporter;
+import org.glavo.ruyi.imager.core.AppDirectories;
+import org.glavo.ruyi.imager.core.StrategySupport;
+import org.glavo.ruyi.imager.core.repo.RuyiRepositoryStore;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 import org.junit.jupiter.api.Test;
@@ -32,6 +35,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,6 +52,32 @@ public final class RuyiDistfileDownloaderTest {
     /// Progress reporter that ignores progress events.
     private static final ProgressReporter NO_PROGRESS = _ -> {
     };
+
+    /// Local preparation never fetches missing components without explicit authorization.
+    @Test
+    public void preparesLocalImageOnlyWithDownloadConsent(@TempDir Path root) throws Exception {
+        byte[] localBytes = "local".getBytes(StandardCharsets.UTF_8);
+        byte[] remoteBytes = "remote".getBytes(StandardCharsets.UTF_8);
+        Path local = Files.write(root.resolve("renamed"), localBytes);
+        try (TinyHttpServer server = new TinyHttpServer(remoteBytes)) {
+            var directories = new AppDirectories(root.resolve("config"), root.resolve("cache"));
+            var service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+            var first = new RuyiDistfile("local.img", List.of(), (long) localBytes.length, Map.of("sha256", sha256(localBytes)),
+                    true, false, null, 0, List.of(), "raw");
+            var second = new RuyiDistfile("remote.img", List.of(server.uri("/remote")), (long) remoteBytes.length,
+                    Map.of("sha256", sha256(remoteBytes)), false, false, null, 0, List.of(), "raw");
+            var image = new ImageEntry("test", "board-image", "combo", "1", null, "board-image/combo", "Combo",
+                    "Vendor", "board", "generic", "dd-v1", Map.of("a", "local.img", "b", "remote.img"),
+                    List.of(first, second), StrategySupport.SUPPORTED);
+            assertEquals(List.of(second), service.prepareLocalImage(image, List.of(local), false, NO_PROGRESS));
+            assertEquals(0, server.requests.get());
+            assertTrue(service.prepareLocalImage(image, List.of(), true, NO_PROGRESS).isEmpty());
+            assertEquals(1, server.requests.get());
+            assertEquals("local", Files.readString(local));
+            assertTrue(service.prepareLocalImage(image, List.of(), false, NO_PROGRESS).isEmpty());
+            assertEquals(1, server.requests.get());
+        }
+    }
 
     /// Verifies that a distfile can be downloaded and verified.
     ///
@@ -340,6 +370,8 @@ public final class RuyiDistfileDownloaderTest {
     /// Minimal HTTP server that supports GET and byte ranges.
     @NotNullByDefault
     private static final class TinyHttpServer implements AutoCloseable {
+        /// Counts HTTP requests to verify offline preparation does not contact a source.
+        private final AtomicInteger requests = new AtomicInteger();
         /// Bytes served by the fixture server.
         private final byte[] content;
 
@@ -411,6 +443,7 @@ public final class RuyiDistfileDownloaderTest {
                     writeResponse(output, 400, 0, 0);
                     return;
                 }
+                requests.incrementAndGet();
 
                 @Nullable String range = null;
                 while (true) {

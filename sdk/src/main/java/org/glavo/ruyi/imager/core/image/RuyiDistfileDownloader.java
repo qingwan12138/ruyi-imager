@@ -12,9 +12,7 @@ import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InterruptedIOException;
-import java.io.OutputStream;
 import java.net.URI;
 import java.net.ProxySelector;
 import java.net.http.HttpClient;
@@ -26,16 +24,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.security.DigestInputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.glavo.ruyi.imager.core.image.DistfileIntegrity.hasSupportedChecksum;
+import static org.glavo.ruyi.imager.core.image.DistfileIntegrity.verify;
 
 /// Downloads and verifies Ruyi distfiles.
 @NotNullByDefault
@@ -346,48 +342,6 @@ public final class RuyiDistfileDownloader {
         }
     }
 
-    /// Verifies a distfile against size and supported checksums.
-    ///
-    /// @param path file path.
-    /// @param distfile distfile declaration.
-    /// @return whether the file matches available integrity metadata.
-    /// @throws IOException when the file cannot be read.
-    private static boolean verify(Path path, RuyiDistfile distfile) throws IOException {
-        if (!Files.isRegularFile(path)) {
-            return false;
-        }
-
-        Long expectedSize = distfile.sizeBytes();
-        if (expectedSize != null && Files.size(path) != expectedSize) {
-            return false;
-        }
-
-        Map<String, String> checksums = distfile.checksums();
-        @Nullable String sha256 = checksums.get("sha256");
-        if (sha256 != null
-                && !sha256.isBlank()
-                && !sha256.equalsIgnoreCase(computeDigest(path, "SHA-256"))) {
-            return false;
-        }
-
-        @Nullable String sha512 = checksums.get("sha512");
-        return sha512 == null
-                || sha512.isBlank()
-                || sha512.equalsIgnoreCase(computeDigest(path, "SHA-512"));
-    }
-
-    /// Returns whether a distfile declares a supported non-empty checksum.
-    ///
-    /// @param distfile distfile declaration.
-    /// @return whether SHA-256 or SHA-512 integrity metadata is available.
-    private static boolean hasSupportedChecksum(RuyiDistfile distfile) {
-        Map<String, String> checksums = distfile.checksums();
-        @Nullable String sha256 = checksums.get("sha256");
-        @Nullable String sha512 = checksums.get("sha512");
-        return (sha256 != null && !sha256.isBlank())
-                || (sha512 != null && !sha512.isBlank());
-    }
-
     /// Creates a manual download error message.
     ///
     /// @param distfile distfile declaration.
@@ -404,26 +358,6 @@ public final class RuyiDistfileDownloader {
             return SdkMessages.get("core.download.manual", distfile.name());
         }
         return SdkMessages.get("core.download.manualWithInstructions", distfile.name(), instructions);
-    }
-
-    /// Computes a message digest for a file.
-    ///
-    /// @param path file path.
-    /// @param algorithm message digest algorithm.
-    /// @return lowercase hexadecimal digest.
-    /// @throws IOException when the file cannot be read.
-    private static String computeDigest(Path path, String algorithm) throws IOException {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance(algorithm);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IOException(SdkMessages.get("core.download.missingDigest", algorithm), e);
-        }
-
-        try (InputStream input = new DigestInputStream(Files.newInputStream(path), digest)) {
-            input.transferTo(OutputStream.nullOutputStream());
-        }
-        return HexFormat.of().formatHex(digest.digest());
     }
 
     /// Reads file size if the file exists.

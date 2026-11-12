@@ -75,6 +75,9 @@ import org.glavo.ruyi.imager.core.image.ImageCacheStatus;
 import org.glavo.ruyi.imager.core.image.ImageCatalog;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
 import org.glavo.ruyi.imager.core.image.ImageTarget;
+import org.glavo.ruyi.imager.core.image.LocalImageMatch;
+import org.glavo.ruyi.imager.core.image.LocalImageMatcher;
+import org.glavo.ruyi.imager.core.image.RuyiDistfile;
 import org.glavo.ruyi.imager.i18n.Messages;
 import org.glavo.ruyi.imager.logging.LoggingProgressReporter;
 import org.glavo.ruyi.imager.logging.RuyiLogging;
@@ -278,6 +281,12 @@ public final class MainWindow {
 
     /// Local image selection button.
     private final Button localImageButton = localizedButton("gui.button.useLocalImage");
+
+    /// Whether the local-image button cancels an active identification or preparation task.
+    private boolean localImageInProgress;
+
+    /// Suppresses completion dialogs after the user cancels local-image preparation.
+    private boolean localImageCancellationRequested;
 
     /// Target selection button.
     private final Button storageButton = new MFXButton();
@@ -609,7 +618,18 @@ public final class MainWindow {
         osButton.setOnAction(_ -> chooseOperatingSystem());
         downloadOsButton.setOnAction(_ -> downloadSelectedImage());
 
-        localImageButton.setOnAction(_ -> chooseLocalImage());
+        localImageButton.setOnAction(_ -> {
+            if (localImageInProgress) {
+                localImageCancellationRequested = true;
+                localImageButton.setDisable(true);
+                @Nullable Thread thread = currentBackgroundThread;
+                if (thread != null) {
+                    thread.interrupt();
+                }
+            } else {
+                chooseLocalImage();
+            }
+        });
 
         storageButton.setOnAction(_ -> chooseStorage());
 
@@ -1663,7 +1683,8 @@ public final class MainWindow {
         FileChooser chooser = new FileChooser();
         chooser.setTitle(Messages.get("gui.dialog.chooseLocalImage"));
         chooser.getExtensionFilters().setAll(
-                new FileChooser.ExtensionFilter(Messages.get("gui.fileChooser.imageFiles"), "*.img", "*.raw", "*.bin", "*.iso"),
+                new FileChooser.ExtensionFilter(Messages.get("gui.fileChooser.imageFiles"),
+                        "*.img", "*.raw", "*.bin", "*.iso", "*.gz", "*.xz", "*.zst", "*.bz2", "*.lz4", "*.zip", "*.tar"),
                 new FileChooser.ExtensionFilter(Messages.get("gui.fileChooser.allFiles"), "*.*"));
 
         @Nullable Path currentLocalImage = state.localImage();
@@ -1681,13 +1702,170 @@ public final class MainWindow {
         }
 
         Path selectedPath = selected.toPath();
-        state = new WizardState(
-                null,
-                null,
-                null,
-                selectedPath,
-                compatibleTarget(state.target(), null, selectedPath));
+        identifyLocalImage(selectedPath);
+    }
+
+    /// Identifies a file using the local catalog only; no device is accessed.
+    private void identifyLocalImage(Path source) {
+        Task<List<LocalImageMatch>> task = new Task<>() {
+            /// Reads the file once against a fixed local catalog snapshot.
+            @Override
+            protected List<LocalImageMatch> call() throws Exception {
+                updateMessage(Messages.get("gui.local.identifying"));
+                return LocalImageMatcher.match(source, services.images().listImages(), event -> {
+                    updateMessage(event.message());
+                    updateProgress(event.currentBytes() == null ? 0 : event.currentBytes(),
+                            event.totalBytes() == null || event.totalBytes() <= 0 ? -1 : event.totalBytes());
+                });
+            }
+        };
+        startLocalImageTask(task, matches -> showLocalImageMatches(source, matches));
+    }
+
+    /// Requires explicit selection of a catalog candidate or an unrecognized raw file.
+    private void showLocalImageMatches(Path source, List<LocalImageMatch> matches) {
+        if (matches.isEmpty()) {
+            if (showConfirmationDialog(Messages.get("gui.local.unrecognized"), Messages.get("gui.local.unrecognized"),
+                    messageContent(Messages.get("gui.local.rawWarning", source.getFileName())),
+                    "gui.local.rawWrite", "material-warning-dialog", null, null)) {
+                selectRawLocalImage(source);
+            }
+            return;
+        }
+        ListView<LocalImageMatch> list = selectionListView();
+        Node candidates = searchableSelectionContent(Messages.get("gui.local.chooseCandidate"), list, matches,
+                (match, query) -> (match.image().displayName() + " " + match.image().atom())
+                        .toLowerCase(Locale.ROOT).contains(query));
+        list.setCellFactory(_ -> new MFXLegacyListCell<>() {
+            /// Shows the exact image, targets, strategy, and component count before confirmation.
+            @Override
+            protected void updateItem(@Nullable LocalImageMatch match, boolean empty) {
+                super.updateItem(match, empty);
+                if (empty || match == null) {
+                    setText(null);
+                } else {
+                    ImageEntry image = match.image();
+                    setText(Messages.get("gui.local.candidate", image.displayName(), image.version(), image.atom(),
+                            image.targets().stream().map(ImageTarget::board).distinct().collect(java.util.stream.Collectors.joining(", ")),
+                            image.strategy(), image.components().size(),
+                            catalogImageFlashable(image) ? "" : Messages.get("gui.image.support.writerUnsupported")));
+                    setWrapText(true);
+                }
+            }
+        });
+        if (!showSearchableSelectionDialog(Messages.get("gui.local.chooseCandidate"), candidates, list, selectionCanConfirm(list))) {
+            return;
+        }
+        ImageEntry image = list.getSelectionModel().getSelectedItem().image();
+        if (!catalogImageFlashable(image)) {
+            showInfo(Messages.get("gui.dialog.imageError"), Messages.get("gui.image.support.writerUnsupported"));
+            return;
+        }
+        ListView<ImageTarget> targets = selectionListView();
+        Node boards = searchableSelectionContent(Messages.get("gui.dialog.chooseBoard"), targets, image.targets(),
+                (target, query) -> (target.board() + " " + target.variant()).toLowerCase(Locale.ROOT).contains(query));
+        targets.setCellFactory(_ -> new MFXLegacyListCell<>() {
+            /// Displays the board and variant without guessing a physical target device.
+            @Override
+            protected void updateItem(@Nullable ImageTarget target, boolean empty) {
+                super.updateItem(target, empty);
+                setText(empty || target == null ? null : target.board() + " / " + target.variant());
+            }
+        });
+        ImageTarget target;
+        if (image.targets().size() == 1) {
+            target = image.targets().getFirst();
+        } else {
+            if (!showSearchableSelectionDialog(Messages.get("gui.dialog.chooseBoard"), boards, targets, selectionCanConfirm(targets))) {
+                return;
+            }
+            target = targets.getSelectionModel().getSelectedItem();
+        }
+        prepareLocalImage(image, target, List.of(source), false);
+    }
+
+    /// Stores an explicitly requested raw write and clears any previously selected device.
+    private void selectRawLocalImage(Path source) {
+        state = new WizardState(null, null, null, source, null);
         refreshState();
+    }
+
+    /// Imports files and prepares all components before exposing the catalog flash workflow.
+    private void prepareLocalImage(ImageEntry image, ImageTarget target, List<Path> sources, boolean allowDownload) {
+        Task<List<RuyiDistfile>> task = new Task<>() {
+            /// Verifies local files and prepares the image without opening a device.
+            @Override
+            protected List<RuyiDistfile> call() throws Exception {
+                updateMessage(Messages.get("gui.local.preparing"));
+                return services.images().prepareLocalImage(image, sources, allowDownload, event -> {
+                    updateMessage(event.message());
+                    updateProgress(event.currentBytes() == null ? 0 : event.currentBytes(),
+                            event.totalBytes() == null || event.totalBytes() <= 0 ? -1 : event.totalBytes());
+                });
+            }
+        };
+        startLocalImageTask(task, missing -> {
+            if (missing.isEmpty()) {
+                selectPreparedLocalImage(image, target);
+            } else {
+                showMissingLocalFiles(image, target, missing);
+            }
+        });
+    }
+
+    /// Activates a prepared image and requires a fresh physical device selection.
+    private void selectPreparedLocalImage(ImageEntry image, ImageTarget target) {
+        state = new WizardState(target.manufacturer(), target.board(), image, null, null);
+        refreshState();
+    }
+
+    /// Offers additional local files or an explicitly authorized download for missing components.
+    private void showMissingLocalFiles(ImageEntry image, ImageTarget target, List<RuyiDistfile> missing) {
+        ListView<String> actions = selectionListView();
+        actions.getItems().add(Messages.get("gui.local.addFiles"));
+        if (missing.stream().noneMatch(RuyiDistfile::fetchRestricted)) {
+            actions.getItems().add(Messages.get("gui.local.downloadMissing"));
+        }
+        actions.setMinHeight(96);
+        actions.setPrefHeight(96);
+        actions.setMaxHeight(96);
+        MFXScrollPane files = new MFXScrollPane(messageContent(Messages.get("gui.local.missing",
+                missing.stream().map(RuyiDistfile::name).collect(java.util.stream.Collectors.joining("\n")))));
+        files.setFitToWidth(true);
+        files.setPrefViewportWidth(SELECTION_LIST_WIDTH);
+        files.setPrefViewportHeight(160);
+        files.setMaxHeight(160);
+        Node content = new VBox(12, files, actions);
+        if (!showSelectionDialog(Messages.get("gui.local.incomplete"), Messages.get("gui.local.incomplete"), content, selectionCanConfirm(actions))) {
+            return;
+        }
+        if (actions.getSelectionModel().getSelectedIndex() == 1) {
+            prepareLocalImage(image, target, List.of(), true);
+        } else {
+            FileChooser chooser = new FileChooser();
+            chooser.setTitle(Messages.get("gui.local.addFiles"));
+            @Nullable List<File> selectedFiles = chooser.showOpenMultipleDialog(ownerWindow());
+            if (selectedFiles != null && !selectedFiles.isEmpty()) {
+                prepareLocalImage(image, target, selectedFiles.stream().map(File::toPath).toList(), false);
+            }
+        }
+    }
+
+    /// Runs a cancellable, non-destructive local-image operation without changing the selection on failure.
+    private <T> void startLocalImageTask(Task<T> task, Consumer<T> onSuccess) {
+        localImageInProgress = true;
+        localImageCancellationRequested = false;
+        localImageButton.textProperty().bind(Messages.binding("gui.dialog.cancel"));
+        startBackgroundTask(task, result -> {
+            if (!localImageCancellationRequested) {
+                onSuccess.accept(result);
+            }
+        }, failure -> {
+            if (!localImageCancellationRequested && !isInterruptionFailure(failure)) {
+                showError(Messages.get("gui.dialog.imageError"),
+                        failure == null ? Messages.get("gui.dialog.emptyResult") : failure.getMessage());
+            }
+        });
     }
 
     /// Opens the storage selection dialog.
@@ -2287,6 +2465,8 @@ public final class MainWindow {
         flashInProgress = false;
         cancellationRequested = false;
         currentBackgroundThread = null;
+        localImageInProgress = false;
+        localImageButton.textProperty().bind(Messages.binding("gui.button.useLocalImage"));
         busy.set(false);
         refreshState();
         if (closeAction != null) {
@@ -2496,7 +2676,7 @@ public final class MainWindow {
                 || state.localImage() != null
                 || selectedImage == null
                 || !canDownloadSelectedImage(selectedImage));
-        localImageButton.setDisable(busy.get());
+        localImageButton.setDisable(localImageInProgress ? localImageCancellationRequested : busy.get());
         storageButton.setDisable(busy.get() || !hasImageSource());
         flashButton.setDisable(!canFlash());
         cancelFlashButton.setDisable(!flashInProgress || cancellationRequested);

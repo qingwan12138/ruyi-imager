@@ -14,6 +14,7 @@ import io.github.palexdev.materialfx.theming.UserAgentBuilder;
 import javafx.animation.Animation;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.scene.control.Button;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.property.ReadOnlyBooleanProperty;
@@ -114,6 +115,98 @@ import static org.junit.jupiter.api.parallel.Resources.SYSTEM_PROPERTIES;
 /// Smoke tests for JavaFX controls used by the main window selection flows.
 @NotNullByDefault
 public final class MainWindowJavaFxSmokeTest {
+    /// Cancelling local preparation leaves the existing selection intact and restores controls.
+    @Test
+    public void cancelsLocalPreparationWithoutChangingSelection(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<Boolean> finished = new CompletableFuture<>();
+        AtomicInteger completions = new AtomicInteger();
+        Object original = runOnJavaFxThread(() -> windowField(window, "state"));
+        try {
+            runOnJavaFxThread(() -> {
+                windowBusy(window).addListener((_, _, busy) -> {
+                    if (!busy) {
+                        finished.complete(true);
+                    }
+                });
+                Task<Boolean> task = new Task<>() {
+                    /// Blocks until interrupted without reading files or opening a device.
+                    @Override
+                    protected Boolean call() throws Exception {
+                        return release.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod("startLocalImageTask", Task.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task, (Consumer<Boolean>) _ -> completions.incrementAndGet());
+                Button local = (Button) windowField(window, "localImageButton");
+                assertFalse(local.isDisabled());
+                assertTrue(((Button) windowField(window, "settingsButton")).isDisabled());
+                local.fire();
+                assertTrue(local.isDisabled());
+                return null;
+            });
+            assertTrue(finished.get(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            runOnJavaFxThread(() -> {
+                assertSame(original, windowField(window, "state"));
+                assertEquals(0, completions.get());
+                assertFalse(windowBusy(window).get());
+                assertFalse(((Button) windowField(window, "localImageButton")).isDisabled());
+                assertFalse(((Button) windowField(window, "settingsButton")).isDisabled());
+                return null;
+            });
+        } finally {
+            release.countDown();
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Prepared local images use catalog strategies and never inherit a previously chosen device.
+    @Test
+    public void preparedLocalImageSelectsCatalogStrategy(@TempDir Path directory) throws Exception {
+        runOnJavaFxThread(() -> {
+            MainWindow window = new MainWindow(testServices(directory));
+            try {
+                var stateField = MainWindow.class.getDeclaredField("state");
+                stateField.setAccessible(true);
+                Class<?> stateClass = stateField.getType();
+                var constructor = stateClass.getDeclaredConstructor(String.class, String.class, ImageEntry.class, Path.class, FlashTarget.class);
+                constructor.setAccessible(true);
+                stateField.set(window, constructor.newInstance(null, null, null, directory.resolve("old.img"),
+                        FlashTarget.blockDevice(blockDevice("old", directory.resolve("target")))));
+                ImageEntry image = image("board-image", "Local fastboot image", "generic", "fastboot-v1", Map.of("rootfs", "rootfs.img"));
+                var select = MainWindow.class.getDeclaredMethod("selectPreparedLocalImage", ImageEntry.class, ImageTarget.class);
+                select.setAccessible(true);
+                select.invoke(window, image, image.targets().getFirst());
+                Object state = stateField.get(window);
+                for (String property : List.of("localImage", "target")) {
+                    var getter = stateClass.getDeclaredMethod(property);
+                    getter.setAccessible(true);
+                    assertNull(getter.invoke(state));
+                }
+                var getter = stateClass.getDeclaredMethod("image");
+                getter.setAccessible(true);
+                assertSame(image, getter.invoke(state));
+                var fastboot = MainWindow.class.getDeclaredMethod("requiresFastbootTarget");
+                fastboot.setAccessible(true);
+                assertEquals(true, fastboot.invoke(window));
+
+                var raw = MainWindow.class.getDeclaredMethod("selectRawLocalImage", Path.class);
+                raw.setAccessible(true);
+                raw.invoke(window, directory.resolve("raw.img"));
+                assertNull(getter.invoke(stateField.get(window)));
+                assertEquals(false, fastboot.invoke(window));
+            } finally {
+                window.shutdown();
+            }
+            return null;
+        });
+    }
+
     /// Checks shared-image filtering, counts, search, and selection without changing the chosen board.
     ///
     /// @param directory isolated application state directory.
