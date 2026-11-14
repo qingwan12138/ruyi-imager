@@ -98,6 +98,24 @@
     -fx-text-fill: #5a6673;
 }
 
+.status-action-button {
+    -fx-font-size: 12px;
+    -fx-padding: 2 12;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+    -fx-background-color: #e8ecf0;
+    -fx-text-fill: #2f3b47;
+    -fx-cursor: hand;
+}
+
+.status-action-button:hover {
+    -fx-background-color: #dde3e9;
+}
+
+.status-action-button:disabled {
+    -fx-opacity: 0.6;
+}
+
 .workflow-scroll-pane {
     -fx-background-color: transparent;
     -fx-background: transparent;

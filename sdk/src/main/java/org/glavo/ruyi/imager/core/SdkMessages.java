@@ -130,6 +130,8 @@ public final class SdkMessages {
             Map.entry("core.download.failed", "Failed to download distfile {0}."),
             Map.entry("core.download.unsupportedScheme", "Unsupported distfile URL scheme: {0}"),
             Map.entry("core.download.downloading", "Downloading {0}"),
+            Map.entry("core.download.connecting", "Connecting to download source: {0}"),
+            Map.entry("core.download.resuming", "Resuming {0} from {1}%"),
             Map.entry("core.download.unexpectedStatus", "Unexpected HTTP status {0} for {1}"),
             Map.entry("core.download.sizeExceeded", "Distfile {0} exceeded its declared size of {1} bytes."),
             Map.entry("core.download.verifyFailed", "Downloaded distfile failed verification: {0}"),

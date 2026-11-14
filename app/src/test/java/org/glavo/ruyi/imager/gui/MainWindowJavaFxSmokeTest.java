@@ -49,6 +49,7 @@ import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.AppServices;
 import org.glavo.ruyi.imager.core.OperationResult;
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
@@ -1088,6 +1089,19 @@ public final class MainWindowJavaFxSmokeTest {
         return field.get(window);
     }
 
+    /// Sets lifecycle state without exposing mutable test hooks in the window API.
+    ///
+    /// @param window window updated on the JavaFX thread.
+    /// @param name declared field name.
+    /// @param value new field value.
+    /// @throws ReflectiveOperationException when the field is unavailable.
+    private static void setWindowField(MainWindow window, String name, Object value)
+            throws ReflectiveOperationException {
+        var field = MainWindow.class.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(window, value);
+    }
+
     /// Verifies flash progress rows are known before backend progress events arrive.
     @Test
     public void createsInitialFlashProgressStages() {
@@ -1369,6 +1383,333 @@ public final class MainWindowJavaFxSmokeTest {
             }
             return null;
         });
+    }
+
+    /// Verifies the paused and aggregate download status texts.
+    @Test
+    public void formatsDownloadStatusTexts() {
+        Locale original = Locale.getDefault();
+        try {
+            Messages.setLocale(Locale.ENGLISH);
+            long fiveMiB = 5L * 1024L * 1024L;
+            long tenMiB = 10L * 1024L * 1024L;
+            assertEquals(
+                    "Download paused: 5.0 MiB downloaded, can resume from 50%",
+                    MainWindow.downloadPausedMessage(fiveMiB, tenMiB));
+            assertEquals(
+                    "Download paused",
+                    MainWindow.downloadPausedMessage(-1L, tenMiB));
+            assertEquals(
+                    "Downloading boot.img · file 2/3 · 5.0 MiB / 10.0 MiB · 1.0 MiB/s · 5s left",
+                    MainWindow.downloadProgressMessage(
+                            "Downloading boot.img", 2, 3, fiveMiB, tenMiB, 1024.0 * 1024.0));
+            assertEquals(
+                    "Downloading boot.img · 5.0 MiB / 10.0 MiB · 1.0 MiB/s · 5s left",
+                    MainWindow.downloadProgressMessage(
+                            "Downloading boot.img", 1, 1, fiveMiB, tenMiB, 1024.0 * 1024.0));
+            assertEquals("1023 B", MainWindow.sizeLabel(1023L));
+            assertEquals("1.5 KiB", MainWindow.sizeLabel(1536L));
+            assertEquals("5s", MainWindow.etaText(5.2));
+            assertEquals("1m 5s", MainWindow.etaText(65.0));
+            assertEquals("1h 1m 5s", MainWindow.etaText(3665.0));
+            assertEquals("11h 6m 39s", MainWindow.etaText(39_999.0));
+        } finally {
+            Messages.setLocale(original);
+        }
+    }
+
+    /// Interrupting an active download switches the window into a resumable paused state.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void pausesDownloadAndOffersResume(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Locale original = Locale.getDefault();
+        CompletableFuture<Boolean> finished = new CompletableFuture<>();
+        try {
+            Messages.setLocale(Locale.ENGLISH);
+            runOnJavaFxThread(() -> {
+                windowBusy(window).addListener((_, _, busy) -> {
+                    if (!busy) {
+                        finished.complete(true);
+                    }
+                });
+                setWindowField(window, "downloadInProgress", true);
+                setWindowField(window, "downloadPauseRequested", true);
+                setWindowField(window, "downloadCurrentBytes", 5L * 1024L * 1024L);
+                setWindowField(window, "downloadTotalBytes", 10L * 1024L * 1024L);
+                Task<Void> task = new Task<>() {
+                    /// Fails with an interruption so the pause path handles it.
+                    ///
+                    /// @return never returns.
+                    /// @throws InterruptedException always.
+                    @Override
+                    protected Void call() throws InterruptedException {
+                        throw new InterruptedException("paused");
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod(
+                        "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task, (Consumer<Void>) _ -> { }, (Consumer<Throwable>) _ -> { });
+                return null;
+            });
+            assertTrue(finished.get(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            runOnJavaFxThread(() -> {
+                assertEquals(true, windowField(window, "downloadPaused"));
+                Button pause = assertInstanceOf(Button.class, windowField(window, "pauseDownloadButton"));
+                assertTrue(pause.isVisible());
+                assertEquals("Resume download", pause.getText());
+                Label status = assertInstanceOf(Label.class, windowField(window, "statusLabel"));
+                assertEquals("Download paused: 5.0 MiB downloaded, can resume from 50%", status.getText());
+                return null;
+            });
+        } finally {
+            Messages.setLocale(original);
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Shows the pause action while a download runs and the resume action while it is paused.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void showsPauseActionOnlyWhileDownloading(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Locale original = Locale.getDefault();
+        try {
+            Messages.setLocale(Locale.ENGLISH);
+            runOnJavaFxThread(() -> {
+                Button pause = assertInstanceOf(Button.class, windowField(window, "pauseDownloadButton"));
+                assertFalse(pause.isVisible());
+                var refresh = MainWindow.class.getDeclaredMethod("refreshDownloadControls");
+                refresh.setAccessible(true);
+                setWindowField(window, "downloadInProgress", true);
+                refresh.invoke(window);
+                assertTrue(pause.isVisible());
+                assertEquals("Pause download", pause.getText());
+                setWindowField(window, "downloadInProgress", false);
+                setWindowField(window, "downloadPaused", true);
+                refresh.invoke(window);
+                assertTrue(pause.isVisible());
+                assertEquals("Resume download", pause.getText());
+                return null;
+            });
+        } finally {
+            Messages.setLocale(original);
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Byte sizes use ASCII digits regardless of the JVM format locale.
+    @Test
+    public void formatsByteSizesWithRootLocale() {
+        Locale original = Locale.getDefault(Locale.Category.FORMAT);
+        try {
+            Locale.setDefault(Locale.Category.FORMAT, Locale.forLanguageTag("ar-EG"));
+            assertEquals("1023 B", MainWindow.sizeLabel(1023L));
+            assertEquals("1.5 KiB", MainWindow.sizeLabel(1536L));
+        } finally {
+            Locale.setDefault(Locale.Category.FORMAT, original);
+        }
+    }
+
+    /// Finishing an unrelated background task keeps a paused download resumable.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void keepsPausedDownloadWhenAnotherTaskFinishes(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        try {
+            ImageEntry image = image("board-image", "Paused image", "generic", "dd-v1", Map.of("disk", "paused.img"));
+            runOnJavaFxThread(() -> {
+                setWindowField(window, "downloadPaused", true);
+                setWindowField(window, "pausedImage", image);
+                var finish = MainWindow.class.getDeclaredMethod("finishBackgroundTask");
+                finish.setAccessible(true);
+                finish.invoke(window);
+                assertEquals(true, windowField(window, "downloadPaused"));
+                assertSame(image, windowField(window, "pausedImage"));
+                return null;
+            });
+        } finally {
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Changing the language keeps the paused download message instead of showing the idle text.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void keepsPausedDownloadMessageWhenLocaleChanges(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Locale original = Locale.getDefault();
+        try {
+            runOnJavaFxThread(() -> {
+                setWindowField(window, "downloadPaused", true);
+                setWindowField(window, "downloadCurrentBytes", 5L * 1024L * 1024L);
+                setWindowField(window, "downloadTotalBytes", 10L * 1024L * 1024L);
+                Messages.setLocale(Locale.GERMANY);
+                Label status = assertInstanceOf(Label.class, windowField(window, "statusLabel"));
+                assertTrue(status.getText().contains("MiB"), status.getText());
+                return null;
+            });
+        } finally {
+            Messages.setLocale(original);
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Byte counters feed download sizes and rates; step and sentinel counters do not.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void onlyByteCountersFeedDownloadSizes(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Locale original = Locale.getDefault();
+        try {
+            Messages.setLocale(Locale.ENGLISH);
+            runOnJavaFxThread(() -> {
+                MainWindow.DownloadProgressUpdate bytes = window.downloadProgressUpdate(new ProgressEvent(
+                        "download", "Downloading image", 5L * 1024L * 1024L, 10L * 1024L * 1024L, ProgressUnit.BYTES));
+                assertFalse(bytes.indeterminate());
+                assertTrue(bytes.message().contains("5.0 MiB / 10.0 MiB"), bytes.message());
+                assertEquals(5L * 1024L * 1024L, windowField(window, "downloadCurrentBytes"));
+
+                MainWindow.DownloadProgressUpdate steps = window.downloadProgressUpdate(new ProgressEvent(
+                        "fastboot", "Sending root", 500L, 1000L, ProgressUnit.STEPS));
+                assertFalse(steps.indeterminate());
+                assertEquals("Sending root", steps.message());
+                assertEquals(-1L, windowField(window, "downloadCurrentBytes"));
+
+                MainWindow.DownloadProgressUpdate sentinel = window.downloadProgressUpdate(new ProgressEvent(
+                        "materialize", "Image prepared", 1L, 1L));
+                assertTrue(sentinel.indeterminate());
+                assertEquals("Image prepared", sentinel.message());
+                assertEquals(-1L, windowField(window, "downloadCurrentBytes"));
+                return null;
+            });
+        } finally {
+            Messages.setLocale(original);
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Finishing another background task restores the paused status and an enabled resume action.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void restoresPausedStatusAfterAnotherTaskFinishes(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Locale original = Locale.getDefault();
+        try {
+            Messages.setLocale(Locale.ENGLISH);
+            ImageEntry image = image("board-image", "Paused image", "generic", "dd-v1", Map.of("disk", "paused.img"));
+            runOnJavaFxThread(() -> {
+                setWindowField(window, "downloadPaused", true);
+                setWindowField(window, "pausedImage", image);
+                setWindowField(window, "downloadCurrentBytes", 5L * 1024L * 1024L);
+                setWindowField(window, "downloadTotalBytes", 10L * 1024L * 1024L);
+                var finish = MainWindow.class.getDeclaredMethod("finishBackgroundTask");
+                finish.setAccessible(true);
+                finish.invoke(window);
+                Label status = assertInstanceOf(Label.class, windowField(window, "statusLabel"));
+                assertEquals("Download paused: 5.0 MiB downloaded, can resume from 50%", status.getText());
+                Button pause = assertInstanceOf(Button.class, windowField(window, "pauseDownloadButton"));
+                assertTrue(pause.isVisible());
+                assertFalse(pause.isDisabled());
+                assertEquals("Resume download", pause.getText());
+                return null;
+            });
+        } finally {
+            Messages.setLocale(original);
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Disables the resume action while another background task occupies the window.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void disablesResumeWhileAnotherTaskRuns(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Locale original = Locale.getDefault();
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<Boolean> finished = new CompletableFuture<>();
+        try {
+            Messages.setLocale(Locale.ENGLISH);
+            ImageEntry image = image("board-image", "Paused image", "generic", "dd-v1", Map.of("disk", "paused.img"));
+            runOnJavaFxThread(() -> {
+                setWindowField(window, "downloadPaused", true);
+                setWindowField(window, "pausedImage", image);
+                setWindowField(window, "downloadCurrentBytes", 5L * 1024L * 1024L);
+                setWindowField(window, "downloadTotalBytes", 10L * 1024L * 1024L);
+                windowBusy(window).addListener((_, _, busy) -> {
+                    if (!busy) {
+                        finished.complete(true);
+                    }
+                });
+                Task<Boolean> task = new Task<>() {
+                    /// Keeps the window busy until the test releases it.
+                    ///
+                    /// @return whether the wait finished.
+                    /// @throws Exception when interrupted.
+                    @Override
+                    protected Boolean call() throws Exception {
+                        return release.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod(
+                        "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task, (Consumer<Boolean>) _ -> { }, (Consumer<Throwable>) _ -> { });
+                Button pause = assertInstanceOf(Button.class, windowField(window, "pauseDownloadButton"));
+                assertTrue(pause.isVisible());
+                assertTrue(pause.isDisabled());
+                return null;
+            });
+            release.countDown();
+            assertTrue(finished.get(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            runOnJavaFxThread(() -> {
+                Button pause = assertInstanceOf(Button.class, windowField(window, "pauseDownloadButton"));
+                assertFalse(pause.isDisabled());
+                Label status = assertInstanceOf(Label.class, windowField(window, "statusLabel"));
+                assertEquals("Download paused: 5.0 MiB downloaded, can resume from 50%", status.getText());
+                return null;
+            });
+        } finally {
+            release.countDown();
+            Messages.setLocale(original);
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
     }
 
     /// Asserts that two laid-out nodes have disjoint vertical bounds in scene coordinates.

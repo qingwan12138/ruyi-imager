@@ -5,6 +5,7 @@ package org.glavo.ruyi.imager.core.flash;
 
 import org.glavo.ruyi.imager.core.OperationResult;
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.ProvisionStrategies;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
@@ -585,7 +586,7 @@ public final class LocalFlashService implements FlashService {
                 + ", verify="
                 + verify);
 
-        reporter.report(new ProgressEvent("flash", writeMessage, 0L, sourceSize));
+        reporter.report(new ProgressEvent("flash", writeMessage, 0L, sourceSize, ProgressUnit.BYTES));
         if (verify) {
             if (!ddImageWriter.writeAndVerify(
                     source,

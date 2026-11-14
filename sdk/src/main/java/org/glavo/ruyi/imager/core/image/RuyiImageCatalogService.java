@@ -324,8 +324,20 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 + downloadDirectory);
 
         ArrayList<Path> downloadedDistfiles = new ArrayList<>();
+        long declaredBytes = ImageProgressAggregator.declaredBytes(image);
+        long completedBytes = 0L;
+        int itemCount = image.distfiles().size();
+        int itemIndex = 0;
         for (RuyiDistfile distfile : image.distfiles()) {
-            downloadedDistfiles.add(downloader.download(distfile, downloadDirectory, reporter));
+            itemIndex++;
+            downloadedDistfiles.add(downloader.download(
+                    distfile,
+                    downloadDirectory,
+                    ImageProgressAggregator.wrap(reporter, completedBytes, declaredBytes, itemIndex, itemCount)));
+            @Nullable Long sizeBytes = distfile.sizeBytes();
+            if (sizeBytes != null && sizeBytes > 0L) {
+                completedBytes += sizeBytes;
+            }
         }
         return materialize(image, downloadedDistfiles, reporter);
     }

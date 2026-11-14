@@ -66,6 +66,7 @@ import org.glavo.ruyi.imager.core.AppServices;
 import org.glavo.ruyi.imager.core.OperationResult;
 import org.glavo.ruyi.imager.core.ProvisionStrategies;
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
 import org.glavo.ruyi.imager.core.fastboot.FastbootDevice;
@@ -303,6 +304,34 @@ public final class MainWindow {
     /// Cancel action shown while a flash operation is active.
     private final Button cancelFlashButton = localizedButton("gui.button.cancelFlash");
 
+    /// Action shown while an image download is active; pauses the download or resumes a paused one.
+    private final Button pauseDownloadButton = new MFXButton();
+
+    /// Whether a catalog image download is active.
+    private boolean downloadInProgress;
+
+    /// Whether the last image download was paused by the user and can be resumed.
+    private boolean downloadPaused;
+
+    /// Whether the active download stopped because the user paused it.
+    private boolean downloadPauseRequested;
+
+    /// Last reported download byte count, or a negative value when unknown.
+    private long downloadCurrentBytes = -1L;
+
+    /// Last reported download total byte count, or a negative value when unknown.
+    private long downloadTotalBytes = -1L;
+
+    /// Number of distfiles in the image being downloaded.
+    private int downloadFileCount;
+
+    /// Index of the distfile currently being downloaded, starting at zero.
+    private int downloadFileIndex;
+
+
+    /// Recent transfer-rate estimate of the active download.
+    private final DownloadRateMeter downloadRateMeter = new DownloadRateMeter();
+
     /// Thread running the current background task, or null when idle.
     private @Nullable Thread currentBackgroundThread;
 
@@ -341,7 +370,9 @@ public final class MainWindow {
         this.root = createRoot();
         Messages.localeProperty().addListener((_, _, _) -> {
             if (!busy.get() && !statusLabel.textProperty().isBound()) {
-                statusLabel.setText(Messages.get("gui.status.ready"));
+                statusLabel.setText(downloadPaused
+                        ? downloadPausedMessage(downloadCurrentBytes, downloadTotalBytes)
+                        : Messages.get("gui.status.ready"));
             }
             refreshState();
         });
@@ -567,7 +598,12 @@ public final class MainWindow {
         progress.setMinWidth(Region.USE_PREF_SIZE);
         progress.setMaxWidth(Region.USE_PREF_SIZE);
         progress.visibleProperty().bind(progressBar.visibleProperty());
-        HBox status = new HBox(16, statusLabel, progress);
+        pauseDownloadButton.getStyleClass().add("status-action-button");
+        pauseDownloadButton.setText(Messages.get("gui.button.pauseDownload"));
+        pauseDownloadButton.setVisible(false);
+        pauseDownloadButton.setManaged(false);
+        pauseDownloadButton.setOnAction(_ -> toggleDownloadPause());
+        HBox status = new HBox(16, statusLabel, progress, pauseDownloadButton);
         status.setAlignment(Pos.CENTER_LEFT);
         status.getStyleClass().add("app-status-bar");
         status.setMinWidth(0);
@@ -2228,19 +2264,42 @@ public final class MainWindow {
         });
     }
 
+    /// Image of the active download, or null when no download is running.
+    private @Nullable ImageEntry downloadImage;
+
+    /// Image of the paused download, or null when no download is paused.
+    private @Nullable ImageEntry pausedImage;
+
     /// Downloads the selected catalog image into the local cache without a target device.
     ///
     /// Downloading ahead of time keeps the target connected only for the actual write, which
     /// matters on slow networks and for boards that must stay in fastboot mode.
     private void downloadSelectedImage() {
         @Nullable ImageEntry selected = state.image();
-        if (selected == null || state.localImage() != null) {
+        if (selected == null || state.localImage() != null || busy.get()) {
             return;
         }
-        ImageEntry image = selected;
-        if (!canDownloadSelectedImage(image)) {
+        if (!canDownloadSelectedImage(selected)) {
             return;
         }
+        startDownload(selected);
+    }
+
+    /// Starts downloading one catalog image, replacing any other paused download.
+    ///
+    /// @param image image to download.
+    private void startDownload(ImageEntry image) {
+        pausedImage = null;
+        downloadImage = image;
+        downloadInProgress = true;
+        downloadPaused = false;
+        downloadPauseRequested = false;
+        downloadCurrentBytes = -1L;
+        downloadTotalBytes = -1L;
+        downloadFileCount = image.distfiles().size();
+        downloadFileIndex = 0;
+        downloadRateMeter.reset();
+        refreshDownloadControls();
 
         Task<Path> task = new Task<>() {
             /// Downloads the image outside the JavaFX application thread.
@@ -2250,14 +2309,13 @@ public final class MainWindow {
             protected Path call() throws Exception {
                 LOGGER.info("Starting GUI image download. atom=" + image.atom());
                 return services.images().downloadImage(image, LoggingProgressReporter.wrap(event -> {
-                    updateMessage(event.message());
-                    @Nullable Long currentBytes = event.currentBytes();
-                    @Nullable Long totalBytes = event.totalBytes();
-                    if (currentBytes != null && totalBytes != null && totalBytes > 0L) {
-                        updateProgress(currentBytes, totalBytes);
-                    } else {
+                    DownloadProgressUpdate update = downloadProgressUpdate(event);
+                    if (update.indeterminate()) {
                         updateProgress(ProgressBar.INDETERMINATE_PROGRESS, 1.0);
+                    } else {
+                        updateProgress(update.progress(), 1.0);
                     }
+                    updateMessage(update.message());
                 }, LOGGER));
             }
         };
@@ -2265,6 +2323,58 @@ public final class MainWindow {
         startBackgroundTask(task, Messages.get("gui.dialog.downloadFailed"), path -> showInfo(
                 Messages.get("gui.dialog.downloadComplete"),
                 Messages.get("gui.dialog.downloadComplete.message", path.toString())));
+    }
+
+    /// One display update derived from a download progress event.
+    ///
+    /// @param message status message to show.
+    /// @param progress JavaFX progress value, or zero when the update is indeterminate.
+    /// @param indeterminate whether the update has no measurable progress.
+    record DownloadProgressUpdate(String message, double progress, boolean indeterminate) {
+    }
+
+    /// Records one download progress event and derives the display update for it.
+    ///
+    /// Only byte counters feed the byte size, transfer rate and paused state; step counters keep
+    /// their percentage and sentinels such as a `1/1` completion marker stay indeterminate.
+    ///
+    /// @param event progress event reported by the image service.
+    /// @return display update for the status bar and progress bar.
+    DownloadProgressUpdate downloadProgressUpdate(ProgressEvent event) {
+        @Nullable String message = event.message();
+        @Nullable Integer itemIndex = event.itemIndex();
+        if (itemIndex != null) {
+            downloadFileIndex = itemIndex;
+        }
+        @Nullable Integer itemCount = event.itemCount();
+        if (itemCount != null) {
+            downloadFileCount = itemCount;
+        }
+        ProgressUnit unit = event.unit();
+        @Nullable Long currentBytes = event.currentBytes();
+        @Nullable Long totalBytes = event.totalBytes();
+        if (unit == ProgressUnit.BYTES && currentBytes != null && totalBytes != null && totalBytes > 0L) {
+            downloadCurrentBytes = currentBytes;
+            downloadTotalBytes = totalBytes;
+            downloadRateMeter.record(currentBytes, System.nanoTime());
+            return new DownloadProgressUpdate(
+                    downloadProgressMessage(
+                            message,
+                            downloadFileIndex,
+                            downloadFileCount,
+                            currentBytes,
+                            totalBytes,
+                            downloadRateMeter.bytesPerSecond()),
+                    progressValue(currentBytes, totalBytes),
+                    false);
+        }
+        downloadCurrentBytes = -1L;
+        downloadTotalBytes = -1L;
+        downloadRateMeter.reset();
+        if (unit == ProgressUnit.STEPS && currentBytes != null && totalBytes != null && totalBytes > 0L) {
+            return new DownloadProgressUpdate(message, progressValue(currentBytes, totalBytes), false);
+        }
+        return new DownloadProgressUpdate(message, 0.0, true);
     }
 
     /// Returns whether the selected catalog image can be downloaded now.
@@ -2327,6 +2437,7 @@ public final class MainWindow {
         });
         task.setOnFailed(_ -> {
             boolean cancelledFlash = flashInProgress && cancellationRequested;
+            boolean pausedDownload = downloadPauseRequested;
             @Nullable Throwable failure = task.getException();
             if (finishBackgroundTask()) {
                 return;
@@ -2334,6 +2445,11 @@ public final class MainWindow {
             if (cancelledFlash && isInterruptionFailure(failure)) {
                 LOGGER.info("GUI background task stopped after cancellation request.", failure);
                 showFlashCancelled();
+                return;
+            }
+            if (pausedDownload && isInterruptionFailure(failure)) {
+                LOGGER.info("GUI image download paused by the user.", failure);
+                showDownloadPaused();
                 return;
             }
             if (failure == null) {
@@ -2350,11 +2466,13 @@ public final class MainWindow {
         thread.start();
     }
 
-    /// Stops update scheduling and coordinates a main-window close request with an active flash operation.
+    /// Stops update scheduling and coordinates a main-window close request with active work.
     ///
-    /// This method must be called on the JavaFX application thread. When flashing is active, it stores the close
-    /// action, requests cancellation, and returns `false`; the action runs after the flash worker and any elevated
-    /// helper cleanup have completed.
+    /// This method must be called on the JavaFX application thread. When an image download is active, it asks for
+    /// confirmation first; declining keeps the window open and restarts update scheduling, while accepting interrupts
+    /// the download worker and stores the close action so the partial file is released before the window closes. When
+    /// flashing is active, it stores the close action, requests cancellation, and returns `false`; the action runs
+    /// after the flash worker and any elevated helper cleanup have completed.
     ///
     /// @param closeAction action that retries closing the stage.
     /// @return whether the stage may close immediately.
@@ -2362,6 +2480,26 @@ public final class MainWindow {
         closing = true;
         applicationUpdateTimer.stop();
         @Nullable Thread thread = currentBackgroundThread;
+        if (downloadInProgress && thread != null && thread.isAlive()) {
+            if (!confirmCloseDuringDownload()) {
+                LOGGER.info("Main window close cancelled during an active image download.");
+                closing = false;
+                restartApplicationUpdateChecks();
+                refreshState();
+                return false;
+            }
+            @Nullable Thread activeThread = currentBackgroundThread;
+            if (!downloadInProgress || activeThread == null || !activeThread.isAlive()) {
+                LOGGER.info("Image download finished while the close confirmation was shown.");
+                return true;
+            }
+            LOGGER.info("Deferring main window close until the image download stops.");
+            if (pendingCloseAction == null) {
+                pendingCloseAction = closeAction;
+            }
+            activeThread.interrupt();
+            return false;
+        }
         if (!flashInProgress || thread == null || !thread.isAlive()) {
             return true;
         }
@@ -2372,6 +2510,34 @@ public final class MainWindow {
         }
         requestFlashCancellation();
         return false;
+    }
+
+    /// Restarts scheduled application update checks after a close request was declined.
+    private void restartApplicationUpdateChecks() {
+        if (closing
+                || !applicationUpdateSchedulingStarted
+                || !updateChecker.current().applicationUpdatesEnabled()
+                || applicationUpdateTimer.getStatus() == Animation.Status.RUNNING) {
+            return;
+        }
+        LOGGER.info("Restarting scheduled application update checks after a declined close request.");
+        applicationUpdateTimer.setCycleCount(Animation.INDEFINITE);
+        applicationUpdateTimer.play();
+    }
+
+    /// Asks whether to close the window while an image download is active.
+    ///
+    /// @return whether the user chose to exit and interrupt the download.
+    private boolean confirmCloseDuringDownload() {
+        return showMaterialDialog(
+                Messages.get("gui.dialog.downloadRunning"),
+                Messages.get("gui.dialog.downloadRunning"),
+                messageContent(Messages.get("gui.dialog.downloadRunning.message")),
+                "gui.button.exit",
+                "material-confirm-dialog",
+                true,
+                null,
+                null);
     }
 
     /// Stops update scheduling and an active flash worker before the JavaFX application exits.
@@ -2458,19 +2624,28 @@ public final class MainWindow {
         pendingCloseAction = null;
         statusLabel.textProperty().unbind();
         progressBar.progressProperty().unbind();
-        statusLabel.setText(Messages.get("gui.status.ready"));
+        statusLabel.setText(downloadPaused
+                ? downloadPausedMessage(downloadCurrentBytes, downloadTotalBytes)
+                : Messages.get("gui.status.ready"));
         progressBar.setProgress(0);
         progressBar.setVisible(false);
         resetPhaseProgress();
+        boolean finishedDownload = downloadInProgress;
         flashInProgress = false;
         cancellationRequested = false;
+        if (finishedDownload) {
+            downloadInProgress = false;
+            downloadPauseRequested = false;
+            downloadPaused = false;
+            downloadImage = null;
+        }
         currentBackgroundThread = null;
         localImageInProgress = false;
         localImageButton.textProperty().bind(Messages.binding("gui.button.useLocalImage"));
         busy.set(false);
         refreshState();
         if (closeAction != null) {
-            LOGGER.info("Closing main window after the flash operation stopped.");
+            LOGGER.info("Closing main window after the background operation stopped.");
             closeAction.run();
             return true;
         }
@@ -2680,6 +2855,132 @@ public final class MainWindow {
         storageButton.setDisable(busy.get() || !hasImageSource());
         flashButton.setDisable(!canFlash());
         cancelFlashButton.setDisable(!flashInProgress || cancellationRequested);
+        refreshDownloadControls();
+    }
+
+    /// Updates the pause and resume action for the current download state.
+    private void refreshDownloadControls() {
+        boolean visible = downloadInProgress || downloadPaused;
+        pauseDownloadButton.setVisible(visible);
+        pauseDownloadButton.setManaged(visible);
+        boolean otherTaskRunning = busy.get() && !downloadInProgress;
+        pauseDownloadButton.setDisable(downloadPauseRequested && !downloadPaused || otherTaskRunning);
+        pauseDownloadButton.setText(Messages.get(
+                downloadPaused ? "gui.button.resumeDownload" : "gui.button.pauseDownload"));
+    }
+
+    /// Pauses a running image download or resumes a paused one.
+    private void toggleDownloadPause() {
+        if (downloadPaused) {
+            resumePausedDownload();
+            return;
+        }
+        requestDownloadPause();
+    }
+
+    /// Requests a pause of the running image download; the partial file is kept for resuming.
+    private void requestDownloadPause() {
+        if (!downloadInProgress || downloadPauseRequested) {
+            return;
+        }
+        @Nullable Thread thread = currentBackgroundThread;
+        if (thread == null || !thread.isAlive()) {
+            return;
+        }
+        LOGGER.info("GUI image download pause requested.");
+        pausedImage = downloadImage;
+        downloadPauseRequested = true;
+        refreshDownloadControls();
+        if (statusLabel.textProperty().isBound()) {
+            statusLabel.textProperty().unbind();
+        }
+        statusLabel.setText(Messages.get("gui.status.pausingDownload"));
+        thread.interrupt();
+    }
+
+    /// Resumes the last paused image download from its partial file.
+    private void resumePausedDownload() {
+        @Nullable ImageEntry image = pausedImage;
+        if (!downloadPaused || busy.get() || image == null) {
+            return;
+        }
+        LOGGER.info("Resuming the paused GUI image download. atom=" + image.atom());
+        downloadPaused = false;
+        refreshDownloadControls();
+        startDownload(image);
+    }
+
+    /// Shows the paused download state after the interrupted worker has stopped.
+    private void showDownloadPaused() {
+        downloadPaused = true;
+        downloadInProgress = false;
+        downloadPauseRequested = false;
+        if (statusLabel.textProperty().isBound()) {
+            statusLabel.textProperty().unbind();
+        }
+        statusLabel.setText(downloadPausedMessage(downloadCurrentBytes, downloadTotalBytes));
+        refreshDownloadControls();
+    }
+
+    /// Formats the status text shown while an image download is paused.
+    ///
+    /// @param currentBytes downloaded bytes, or a negative value when unknown.
+    /// @param totalBytes total byte count, or a negative value when unknown.
+    /// @return localized paused status text.
+    static String downloadPausedMessage(long currentBytes, long totalBytes) {
+        if (currentBytes < 0L || totalBytes <= 0L) {
+            return Messages.get("gui.status.downloadPausedUnknown");
+        }
+        return Messages.get("gui.status.downloadPaused",
+                sizeLabel(currentBytes),
+                percentText(progressValue(currentBytes, totalBytes)));
+    }
+
+
+    /// Formats the aggregate status text of an image download.
+    ///
+    /// @param message message of the current distfile.
+    /// @param fileIndex one-based index of the current distfile.
+    /// @param fileCount number of distfiles in the image.
+    /// @param currentBytes downloaded bytes of the whole image.
+    /// @param totalBytes declared size of the whole image.
+    /// @param bytesPerSecond average transfer rate, or zero when unknown.
+    /// @return localized status text.
+    static String downloadProgressMessage(
+            String message,
+            int fileIndex,
+            int fileCount,
+            long currentBytes,
+            long totalBytes,
+            double bytesPerSecond) {
+        String rate = bytesPerSecond <= 0.0
+                ? Messages.get("gui.status.downloadRateUnknown")
+                : Messages.get("gui.status.downloadRate", sizeLabel((long) bytesPerSecond));
+        String eta = bytesPerSecond <= 0.0
+                ? Messages.get("gui.status.downloadEtaUnknown")
+                : etaText(Math.max(0L, totalBytes - currentBytes) / bytesPerSecond);
+        if (fileCount <= 1) {
+            return Messages.get("gui.status.downloadProgressSingle",
+                    message, sizeLabel(currentBytes), sizeLabel(totalBytes), rate, eta);
+        }
+        return Messages.get("gui.status.downloadProgress",
+                message, fileIndex, fileCount, sizeLabel(currentBytes), sizeLabel(totalBytes), rate, eta);
+    }
+
+    /// Formats a remaining-time value with hours, minutes and seconds.
+    ///
+    /// @param seconds remaining time in seconds.
+    /// @return localized remaining-time text.
+    static String etaText(double seconds) {
+        long total = Math.max(0L, Math.round(seconds));
+        if (total < 60L) {
+            return Messages.get("gui.status.downloadEtaSeconds", total);
+        }
+        if (total < 3600L) {
+            return Messages.get("gui.status.downloadEtaMinutes", total / 60L, total % 60L);
+        }
+        return Messages.get("gui.status.downloadEtaHours",
+                total / 3600L, total % 3600L / 60L, total % 60L);
     }
 
     /// Refreshes the compact selection summary shown while flashing.
@@ -3597,18 +3898,22 @@ public final class MainWindow {
     /// @return human-readable target size.
     private static String targetSizeLabel(BlockDevice target) {
         long size = target.sizeBytes();
-        if (size <= 0L) {
-            return Messages.get("gui.target.sizeUnknown");
-        }
+        return size <= 0L ? Messages.get("gui.target.sizeUnknown") : sizeLabel(size);
+    }
 
-        double value = size;
+    /// Formats a byte count for display.
+    ///
+    /// @param bytes byte count.
+    /// @return human-readable size.
+    static String sizeLabel(long bytes) {
+        double value = bytes;
         int unitIndex = 0;
         while (value >= 1024.0 && unitIndex < SIZE_UNITS.size() - 1) {
             value /= 1024.0;
             unitIndex++;
         }
         if (unitIndex == 0) {
-            return "%d %s".formatted(size, SIZE_UNITS.get(unitIndex));
+            return String.format(Locale.ROOT, "%d %s", bytes, SIZE_UNITS.get(unitIndex));
         }
         return String.format(Locale.ROOT, "%.1f %s", value, SIZE_UNITS.get(unitIndex));
     }
