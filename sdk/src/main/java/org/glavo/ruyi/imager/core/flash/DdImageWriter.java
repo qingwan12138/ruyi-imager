@@ -4,6 +4,7 @@
 package org.glavo.ruyi.imager.core.flash;
 
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
 import org.jetbrains.annotations.NotNullByDefault;
@@ -62,7 +63,7 @@ public interface DdImageWriter {
             String verifyMessage,
             ProgressReporter reporter) throws IOException {
         write(source, target, totalBytes, writeMessage, reporter);
-        reporter.report(new ProgressEvent("verify", verifyMessage, 0L, totalBytes));
+        reporter.report(new ProgressEvent("verify", verifyMessage, 0L, totalBytes, ProgressUnit.BYTES));
         return verify(source, target, totalBytes, verifyMessage, reporter);
     }
 

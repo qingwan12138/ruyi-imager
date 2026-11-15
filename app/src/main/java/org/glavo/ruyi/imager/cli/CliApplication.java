@@ -50,6 +50,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -361,7 +362,8 @@ public final class CliApplication implements Callable<Integer> {
         if (json) {
             reporter = event -> JsonOutput.print(progressEventMap(event));
         } else {
-            reporter = event -> System.err.printf("%s: %s%n", event.stage(), event.message());
+            CliProgressPrinter printer = new CliProgressPrinter(System.err);
+            reporter = printer::report;
         }
 
         return LoggingProgressReporter.wrap(reporter, LOGGER);
@@ -378,6 +380,15 @@ public final class CliApplication implements Callable<Integer> {
         map.put("message", event.message());
         map.put("currentBytes", event.currentBytes());
         map.put("totalBytes", event.totalBytes());
+        map.put("unit", event.unit().name().toLowerCase(Locale.ROOT));
+        @Nullable Integer itemIndex = event.itemIndex();
+        if (itemIndex != null) {
+            map.put("itemIndex", itemIndex);
+        }
+        @Nullable Integer itemCount = event.itemCount();
+        if (itemCount != null) {
+            map.put("itemCount", itemCount);
+        }
         return map;
     }
 

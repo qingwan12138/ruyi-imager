@@ -6,6 +6,7 @@ package org.glavo.ruyi.imager.core.flash;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.SdkMessages;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
@@ -1292,7 +1293,8 @@ public final class ProcessDdImageWriter implements DdImageWriter {
                             sink.stage(),
                             sink.message(),
                             event.path("currentBytes").asLong(),
-                            event.path("totalBytes").asLong()));
+                            event.path("totalBytes").asLong(),
+                            ProgressUnit.BYTES));
                 }
                 case "complete" -> {
                     completed = true;

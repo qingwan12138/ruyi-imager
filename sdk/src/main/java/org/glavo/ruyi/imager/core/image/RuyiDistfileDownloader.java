@@ -4,6 +4,7 @@
 package org.glavo.ruyi.imager.core.image;
 
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.NetworkDefaults;
 import org.glavo.ruyi.imager.core.SdkMessages;
@@ -109,7 +110,8 @@ public final class RuyiDistfileDownloader {
                     "download",
                     SdkMessages.get("core.download.cached", distfile.name()),
                     bytesOrNull(target),
-                    distfile.sizeBytes()));
+                    distfile.sizeBytes(),
+                    ProgressUnit.BYTES));
             return target;
         }
 
@@ -196,7 +198,9 @@ public final class RuyiDistfileDownloader {
                     + LogRedactor.redactUri(sourceUri)
                     + ", resumeBytes="
                     + resumeBytes);
-            reporter.report(new ProgressEvent("download", SdkMessages.get("core.download.downloading", distfile.name()), existingBytes, expectedSize));
+            reporter.report(ProgressEvent.indeterminate(
+                    "download",
+                    SdkMessages.get("core.download.connecting", distfile.name())));
             try (DistfileResponseBody body = new DistfileResponseBody()) {
                 HttpResponse<DistfileResponseBody> response = httpClient.send(requestBuilder.build(), _ -> body);
                 int statusCode = response.statusCode();
@@ -228,6 +232,18 @@ public final class RuyiDistfileDownloader {
                     LOGGER.atInfo().log(() -> "Source ignored range request; restarting partial download. name=" + distfile.name());
                     existingBytes = 0L;
                 }
+                long resumedBytes = existingBytes;
+                reporter.report(new ProgressEvent(
+                        "download",
+                        resumedBytes > 0L && expectedSize != null && expectedSize > 0L
+                                ? SdkMessages.get(
+                                        "core.download.resuming",
+                                        distfile.name(),
+                                        Math.min(100L, resumedBytes * 100L / expectedSize))
+                                : SdkMessages.get("core.download.downloading", distfile.name()),
+                        resumedBytes,
+                        expectedSize,
+                        ProgressUnit.BYTES));
 
                 writeResponse(response.body(), partial, distfile, reporter, existingBytes, append);
                 return;
@@ -313,7 +329,8 @@ public final class RuyiDistfileDownloader {
                             "download",
                             SdkMessages.get("core.download.downloading", distfile.name()),
                             currentBytes,
-                            distfile.sizeBytes()));
+                            distfile.sizeBytes(),
+                            ProgressUnit.BYTES));
                 }
                 body.requestNext();
             }

@@ -3,7 +3,9 @@
 
 package org.glavo.ruyi.imager.core.image;
 
+import org.glavo.ruyi.imager.core.ProgressEvent;
 import org.glavo.ruyi.imager.core.ProgressReporter;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.repo.RuyiRepositoryStore;
@@ -132,10 +134,55 @@ public final class RuyiDistfileDownloaderTest {
                     List.of(),
                     "raw");
 
-            Path result = new RuyiDistfileDownloader().download(distfile, temporaryDirectory, NO_PROGRESS);
+            List<ProgressEvent> events = new ArrayList<>();
+            Path result = new RuyiDistfileDownloader().download(distfile, temporaryDirectory, events::add);
 
             assertArrayEquals(content, Files.readAllBytes(result));
             assertEquals(List.of("bytes=128-"), server.rangeRequests());
+            assertConnectingEvent(events);
+            assertTrue(
+                    events.stream().anyMatch(event -> event.message().startsWith("Resuming")),
+                    events.toString());
+        }
+    }
+
+    /// Verifies that a source ignoring the range request is reported as a restart, not a resume.
+    ///
+    /// @param temporaryDirectory directory holding the partial file.
+    /// @throws Exception when the fixture server or filesystem fails.
+    @Test
+    public void reportsRestartWhenSourceIgnoresRange(@TempDir Path temporaryDirectory) throws Exception {
+        byte[] content = new byte[1024];
+        for (int i = 0; i < content.length; i++) {
+            content[i] = (byte) i;
+        }
+
+        Files.write(temporaryDirectory.resolve("image.raw.part"), Arrays.copyOf(content, 128));
+        try (TinyHttpServer server = new TinyHttpServer(content)) {
+            RuyiDistfile distfile = new RuyiDistfile(
+                    "image.raw",
+                    List.of(server.uri("/no-range")),
+                    (long) content.length,
+                    Map.of("sha256", sha256(content)),
+                    false,
+                    true,
+                    null,
+                    0,
+                    List.of(),
+                    "raw");
+
+            List<ProgressEvent> events = new ArrayList<>();
+            Path result = new RuyiDistfileDownloader().download(distfile, temporaryDirectory, events::add);
+
+            assertArrayEquals(content, Files.readAllBytes(result));
+            assertEquals(List.of("bytes=128-"), server.rangeRequests());
+            assertConnectingEvent(events);
+            assertTrue(
+                    events.stream().noneMatch(event -> event.message().startsWith("Resuming")),
+                    events.toString());
+            assertTrue(
+                    events.stream().anyMatch(event -> event.message().startsWith("Downloading")),
+                    events.toString());
         }
     }
 
@@ -367,6 +414,17 @@ public final class RuyiDistfileDownloaderTest {
         }
     }
 
+    /// Asserts that a download attempt reports a neutral connecting event without byte counters.
+    ///
+    /// @param events reported progress events.
+    private static void assertConnectingEvent(List<ProgressEvent> events) {
+        assertTrue(
+                events.stream().anyMatch(event -> event.stage().equals("download")
+                        && event.message().startsWith("Connecting")
+                        && event.unit() == ProgressUnit.NONE),
+                events.toString());
+    }
+
     /// Minimal HTTP server that supports GET and byte ranges.
     @NotNullByDefault
     private static final class TinyHttpServer implements AutoCloseable {
@@ -466,6 +524,14 @@ public final class RuyiDistfileDownloaderTest {
                     if (reader.read() == -1) {
                         stalledConnectionClosed.countDown();
                     }
+                    return;
+                }
+
+                if (requestLine.startsWith("GET /no-range")) {
+                    if (range != null) {
+                        rangeRequests.add(range);
+                    }
+                    writeResponse(output, 200, 0, content.length);
                     return;
                 }
 

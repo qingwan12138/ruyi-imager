@@ -4,6 +4,7 @@
 package org.glavo.ruyi.imager.core.image;
 
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.SdkMessages;
 import org.jetbrains.annotations.NotNullByDefault;
@@ -89,7 +90,7 @@ final class DistfileIntegrity {
                     sha512.update(buffer, 0, read);
                 }
                 count += read;
-                reporter.report(new ProgressEvent("import", SdkMessages.get("core.local.reading", path.getFileName()), count, size));
+                reporter.report(new ProgressEvent("import", SdkMessages.get("core.local.reading", path.getFileName()), count, size, ProgressUnit.BYTES));
             }
         }
         checkInterrupted();

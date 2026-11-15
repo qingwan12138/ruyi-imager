@@ -5,6 +5,7 @@ package org.glavo.ruyi.imager.core.fastboot;
 
 import org.glavo.ruyi.imager.core.OperationResult;
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.ProvisionStrategies;
 import org.glavo.ruyi.imager.core.SdkMessages;
@@ -797,7 +798,7 @@ public final class ProcessFastbootService implements FastbootService {
     /// @param totalSteps total step count.
     /// @return progress event.
     private static ProgressEvent progress(String message, int currentStep, int totalSteps) {
-        return new ProgressEvent("fastboot", message, progressUnits(currentStep), progressUnits(totalSteps));
+        return new ProgressEvent("fastboot", message, progressUnits(currentStep), progressUnits(totalSteps), ProgressUnit.STEPS);
     }
 
     /// Converts a high-level fastboot step count into progress units.
@@ -1050,7 +1051,7 @@ public final class ProcessFastbootService implements FastbootService {
         /// @param message progress message.
         /// @param currentUnits current progress units.
         private void report(String message, long currentUnits) {
-            reporter.report(new ProgressEvent("fastboot", message, currentUnits, totalUnits));
+            reporter.report(new ProgressEvent("fastboot", message, currentUnits, totalUnits, ProgressUnit.STEPS));
         }
     }
 
