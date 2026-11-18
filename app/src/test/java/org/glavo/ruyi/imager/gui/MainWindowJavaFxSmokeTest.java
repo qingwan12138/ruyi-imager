@@ -15,6 +15,9 @@ import javafx.animation.Animation;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
+import javafx.scene.control.CheckBoxTreeItem;
+import javafx.scene.control.TreeView;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.property.ReadOnlyBooleanProperty;
@@ -49,6 +52,8 @@ import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.AppServices;
 import org.glavo.ruyi.imager.core.OperationResult;
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.image.ImageCacheEntry;
+import org.glavo.ruyi.imager.core.image.ImageCacheUsage;
 import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.StrategySupport;
@@ -86,6 +91,7 @@ import java.awt.GraphicsEnvironment;
 import java.io.IOException;
 import java.net.URL;
 import java.nio.file.Files;
+import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -1362,7 +1368,7 @@ public final class MainWindowJavaFxSmokeTest {
                 assertTrue(language.localToScene(language.getLayoutBounds()).getMinY()
                         - header.localToScene(header.getLayoutBounds()).getMaxY() >= 12);
                 assertTrue(dialog.getWidth() <= 500);
-                assertTrue(dialog.getHeight() < 320);
+                assertTrue(dialog.getHeight() < 420);
                 double initialHeight = dialog.getHeight();
                 double initialWidth = dialog.getWidth();
                 settings.metadataUpdateStarted();
@@ -1710,6 +1716,116 @@ public final class MainWindowJavaFxSmokeTest {
                 return null;
             });
         }
+    }
+
+    /// Groups cached versions into a checkable tree and tracks the selection size.
+    @Test
+    public void groupsCacheEntriesInCheckableTree() throws Exception {
+        long gib = 1024L * 1024L * 1024L;
+        long mib = 1024L * 1024L;
+        ImageCacheEntry first = new ImageCacheEntry(
+                "ruyisdk", "board-image", "meles", "1.0.0", "board-image/meles(1.0.0)",
+                5L * gib, 1L * gib, 0L, 0, 1_000L);
+        ImageCacheEntry second = new ImageCacheEntry(
+                "ruyisdk", "board-image", "meles", "2.0.0", "board-image/meles(2.0.0)",
+                1L * mib, 0L, 10L * mib, 2, 2_000L);
+        ImageCacheUsage usage = new ImageCacheUsage(
+                List.of(first, second),
+                1L * gib,
+                5L * gib,
+                10L * mib,
+                2,
+                0L,
+                0L,
+                List.of());
+        Locale original = Locale.getDefault();
+        try {
+            Messages.setLocale(Locale.ENGLISH);
+            runOnJavaFxThread(() -> {
+                CacheManagerDialog dialog = new CacheManagerDialog(usage);
+                TreeView<?> tree = assertInstanceOf(TreeView.class, objectField(dialog, CacheManagerDialog.class, "tree"));
+                Button clean = assertInstanceOf(Button.class, dialog.cleanButton());
+                assertEquals(1, tree.getRoot().getChildren().size());
+                CheckBoxTreeItem<?> category = assertInstanceOf(
+                        CheckBoxTreeItem.class, tree.getRoot().getChildren().getFirst());
+                assertEquals(1, category.getChildren().size());
+                CheckBoxTreeItem<?> name = assertInstanceOf(
+                        CheckBoxTreeItem.class, category.getChildren().getFirst());
+                assertEquals(2, name.getChildren().size());
+                assertTrue(clean.isDisabled());
+
+                category.setSelected(true);
+                assertEquals(2, dialog.selectedEntries().size());
+                assertEquals(6L * gib + 11L * mib, dialog.selectedBytes());
+                assertFalse(clean.isDisabled());
+
+                CheckBox partials = assertInstanceOf(
+                        CheckBox.class, objectField(dialog, CacheManagerDialog.class, "partialsCheckBox"));
+                assertTrue(partials.isVisible());
+                category.setSelected(false);
+                assertEquals(0L, dialog.selectedBytes());
+                assertTrue(clean.isDisabled());
+
+                partials.setSelected(true);
+                assertEquals(10L * mib, dialog.selectedBytes());
+                dialog.invertSelection();
+                assertEquals(6L * gib + 11L * mib, dialog.selectedBytes());
+                return null;
+            });
+        } finally {
+            Messages.setLocale(original);
+        }
+    }
+
+    /// Shows the measured cache usage in the settings dialog.
+    @Test
+    public void showsCacheUsageInSettings() throws Exception {
+        long gib = 1024L * 1024L * 1024L;
+        ImageCacheUsage usage = new ImageCacheUsage(
+                List.of(),
+                1L * gib,
+                2L * gib,
+                0L,
+                0,
+                0L,
+                0L,
+                List.of());
+        Locale original = Locale.getDefault();
+        try {
+            Messages.setLocale(Locale.ENGLISH);
+            runOnJavaFxThread(() -> {
+                SettingsDialog settings = new SettingsDialog(
+                        Locale.ENGLISH,
+                        new BuildInfo("1.0.0", true),
+                        new UpdateSource(URI.create("https://example.com/manifest.json")),
+                        true,
+                        UpdateChannel.STABLE,
+                        new SimpleBooleanProperty(false),
+                        usage);
+                Label cacheUsage = assertInstanceOf(
+                        Label.class, objectField(settings, SettingsDialog.class, "cacheUsageLabel"));
+                assertTrue(cacheUsage.getText().contains("3.0 GiB"), cacheUsage.getText());
+                settings.updateCacheUsage(null);
+                assertEquals(Messages.get("gui.settings.cacheUnknown"), cacheUsage.getText());
+                return null;
+            });
+        } finally {
+            Messages.setLocale(original);
+        }
+    }
+
+    /// Reads one declared field of an arbitrary object.
+    ///
+    /// @param target object to inspect.
+    /// @param owner class declaring the field.
+    /// @param name field name.
+    /// @return field value.
+    /// @throws ReflectiveOperationException when the field is unavailable.
+    private static @Nullable Object objectField(Object target, Class<?> owner, String name)
+            throws ReflectiveOperationException {
+        var field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
     }
 
     /// Asserts that two laid-out nodes have disjoint vertical bounds in scene coordinates.

@@ -27,6 +27,7 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.util.StringConverter;
+import org.glavo.ruyi.imager.core.image.ImageCacheUsage;
 import org.glavo.ruyi.imager.i18n.Messages;
 import org.glavo.ruyi.imager.update.BuildInfo;
 import org.glavo.ruyi.imager.update.UpdateChannel;
@@ -73,6 +74,12 @@ final class SettingsDialog {
     /// Manual metadata update button.
     private final Button metadataUpdateButton;
 
+    /// Cache management button.
+    private final Button cacheManageButton;
+
+    /// Cache usage summary.
+    private final Label cacheUsageLabel;
+
     /// Manual metadata update status.
     private final Label metadataUpdateStatus;
 
@@ -81,6 +88,24 @@ final class SettingsDialog {
 
     /// Indeterminate progress shown while updating repository metadata.
     private final MFXProgressBar metadataUpdateProgress = createProgressBar();
+
+    /// Creates settings controls without a cache usage summary.
+    ///
+    /// @param locale selected GUI locale.
+    /// @param buildInfo running application build.
+    /// @param updateSource local or HTTPS update manifest location.
+    /// @param automaticUpdateChecks whether startup and periodic update checks are enabled.
+    /// @param updateChannel selected update channel.
+    /// @param busy shared background-operation state.
+    SettingsDialog(
+            Locale locale,
+            BuildInfo buildInfo,
+            UpdateSource updateSource,
+            boolean automaticUpdateChecks,
+            UpdateChannel updateChannel,
+            ObservableBooleanValue busy) {
+        this(locale, buildInfo, updateSource, automaticUpdateChecks, updateChannel, busy, null);
+    }
 
     /// Creates settings controls with current values.
     ///
@@ -96,7 +121,8 @@ final class SettingsDialog {
             UpdateSource updateSource,
             boolean automaticUpdateChecks,
             UpdateChannel updateChannel,
-            ObservableBooleanValue busy) {
+            ObservableBooleanValue busy,
+            @Nullable ImageCacheUsage cacheUsage) {
         this.languageSelector = createLanguageSelector(locale);
         this.automaticUpdateChecks = new CheckBox(Messages.get("gui.settings.automaticUpdateChecks"));
         this.automaticUpdateChecks.setSelected(automaticUpdateChecks);
@@ -108,6 +134,13 @@ final class SettingsDialog {
         this.metadataUpdateButton = new MFXButton(Messages.get("gui.settings.updateMetadata"));
         this.metadataUpdateButton.getStyleClass().add("settings-action-button");
         this.metadataUpdateStatus = createStatusLabel();
+        this.cacheManageButton = new MFXButton(Messages.get("gui.settings.manageCache"));
+        this.cacheManageButton.getStyleClass().add("settings-action-button");
+        this.cacheUsageLabel = new Label();
+        this.cacheUsageLabel.getStyleClass().add("settings-source");
+        this.cacheUsageLabel.setWrapText(true);
+        this.cacheUsageLabel.setMinWidth(0);
+        updateCacheUsage(cacheUsage);
 
         GridPane generalGrid = createSettingsGrid();
         generalGrid.add(settingsLabel("gui.language"), 0, 0);
@@ -142,10 +175,18 @@ final class SettingsDialog {
                 updateGrid);
         applicationUpdateSection.getStyleClass().add("settings-section");
 
+        Label cacheTitle = new Label(Messages.get("gui.settings.cache"));
+        cacheTitle.getStyleClass().add("settings-section-title");
+        HBox cacheActions = new HBox(12, cacheManageButton);
+        cacheActions.setAlignment(Pos.CENTER_LEFT);
+        VBox cacheSection = new VBox(cacheTitle, cacheUsageLabel, cacheActions);
+        cacheSection.getStyleClass().add("settings-section");
+
         this.root = new VBox(generalGrid);
         if (buildInfo.applicationUpdatesEnabled()) {
             this.root.getChildren().add(applicationUpdateSection);
         }
+        this.root.getChildren().add(cacheSection);
         this.root.getStyleClass().add("settings-content");
         this.root.disableProperty().bind(busy);
     }
@@ -183,6 +224,32 @@ final class SettingsDialog {
     /// @return metadata update button.
     Button metadataUpdateButton() {
         return metadataUpdateButton;
+    }
+
+    /// Returns the cache management button.
+    ///
+    /// @return cache management button.
+    Button cacheManageButton() {
+        return cacheManageButton;
+    }
+
+    /// Replaces the cache usage summary.
+    ///
+    /// @param cacheUsage measured cache usage, or null when it could not be measured.
+    void updateCacheUsage(@Nullable ImageCacheUsage cacheUsage) {
+        if (cacheUsage == null) {
+            cacheUsageLabel.setText(Messages.get("gui.settings.cacheUnknown"));
+            return;
+        }
+        if (cacheUsage.totalBytes() == 0L && cacheUsage.partialFiles() == 0) {
+            cacheUsageLabel.setText(Messages.get("gui.settings.cacheEmpty"));
+            return;
+        }
+        cacheUsageLabel.setText(Messages.get("gui.settings.cacheUsage",
+                MainWindow.sizeLabel(cacheUsage.totalBytes()),
+                MainWindow.sizeLabel(cacheUsage.downloadBytes()),
+                MainWindow.sizeLabel(cacheUsage.artifactBytes()),
+                MainWindow.sizeLabel(cacheUsage.partialBytes())));
     }
 
     /// Returns the application update check button.

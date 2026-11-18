@@ -74,6 +74,10 @@ import org.glavo.ruyi.imager.core.flash.FlashRequest;
 import org.glavo.ruyi.imager.core.flash.FlashTarget;
 import org.glavo.ruyi.imager.core.image.ImageCacheStatus;
 import org.glavo.ruyi.imager.core.image.ImageCatalog;
+import org.glavo.ruyi.imager.core.image.ImageCacheCleanResult;
+import org.glavo.ruyi.imager.core.image.ImageCacheEntry;
+import org.glavo.ruyi.imager.core.image.ImageCacheService;
+import org.glavo.ruyi.imager.core.image.ImageCacheUsage;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
 import org.glavo.ruyi.imager.core.image.ImageTarget;
 import org.glavo.ruyi.imager.core.image.LocalImageMatch;
@@ -1234,11 +1238,13 @@ public final class MainWindow {
                 updateChecker.source(),
                 automaticUpdateChecks,
                 updateChannel,
-                busy.getReadOnlyProperty());
+                busy.getReadOnlyProperty(),
+                readCacheUsage());
         if (updateChecker.current().applicationUpdatesEnabled()) {
             settings.applicationUpdateButton().setOnAction(_ -> checkApplicationUpdate(settings));
         }
         settings.metadataUpdateButton().setOnAction(_ -> updateRepository(settings));
+        settings.cacheManageButton().setOnAction(_ -> showCacheManager(settings));
         boolean accepted;
         try {
             accepted = showConfirmationDialog(
@@ -1274,6 +1280,133 @@ public final class MainWindow {
             LOGGER.warn("Failed to write GUI preferences.", exception);
             showError(Messages.get("gui.dialog.preferencesWriteFailed"), exception.getMessage());
         }
+    }
+
+    /// Reads the current image download cache usage.
+    ///
+    /// @return measured usage, or null when the cache cannot be read.
+    private @Nullable ImageCacheUsage readCacheUsage() {
+        try {
+            return new ImageCacheService(services.directories()).usage();
+        } catch (RuntimeException exception) {
+            LOGGER.warn("Failed to measure the image download cache.", exception);
+            return null;
+        }
+    }
+
+    /// Shows the cache manager and removes the selected cache contents.
+    ///
+    /// @param settings settings dialog whose usage summary is refreshed after cleaning.
+    private void showCacheManager(SettingsDialog settings) {
+        @Nullable ImageCacheUsage usage = readCacheUsage();
+        if (usage == null) {
+            showError(Messages.get("gui.dialog.cacheError"), Messages.get("gui.settings.cacheUnknown"));
+            return;
+        }
+        CacheManagerDialog dialog = new CacheManagerDialog(usage);
+        AtomicBoolean accepted = new AtomicBoolean();
+        MFXGenericDialogBuilder dialogBuilder = MFXGenericDialogBuilder.build()
+                .setHeaderText(Messages.get("gui.cache.title"))
+                .setContent(dialog.root())
+                .setShowClose(false)
+                .setShowMinimize(false)
+                .setShowAlwaysOnTop(false)
+                .addStyleClasses("material-dialog", "material-settings-dialog");
+        @Nullable String stylesheet = applicationStylesheet();
+        if (stylesheet != null) {
+            dialogBuilder.addStylesheets(stylesheet);
+        }
+        MFXGenericDialog dialogContent = dialogBuilder.get();
+        MFXStageDialogBuilder stageBuilder = MFXStageDialogBuilder.build()
+                .setContent(dialogContent)
+                .setOwnerNode(root)
+                .setCenterInOwnerNode(true)
+                .setScrimOwner(true)
+                .setScrimStrength(0.35)
+                .setDraggable(true)
+                .setOverlayClose(false)
+                .initModality(Modality.WINDOW_MODAL)
+                .setTitle(Messages.get("gui.cache.title"));
+        @Nullable Window owner = ownerWindow();
+        if (owner != null) {
+            stageBuilder.initOwner(owner);
+        }
+        MFXStageDialog stage = stageBuilder.get();
+        dialog.closeButton().setOnAction(_ -> stage.close());
+        dialog.cleanButton().setOnAction(_ -> {
+            accepted.set(true);
+            stage.close();
+        });
+        stage.showAndWait();
+        stage.dispose();
+        if (!accepted.get()) {
+            return;
+        }
+        List<ImageCacheEntry> entries = dialog.selectedEntries();
+        boolean partials = dialog.cleansPartials();
+        if (entries.isEmpty() && !partials) {
+            return;
+        }
+        if (!confirmCacheCleanup(dialog.selectedBytes())) {
+            return;
+        }
+        cleanCache(entries, partials, settings);
+    }
+
+    /// Asks whether the selected cache contents should be removed.
+    ///
+    /// @param bytes number of bytes that would be removed.
+    /// @return whether the user confirmed the removal.
+    private boolean confirmCacheCleanup(long bytes) {
+        return showMaterialDialog(
+                Messages.get("gui.cache.cleanConfirmTitle"),
+                Messages.get("gui.cache.cleanConfirmTitle"),
+                messageContent(Messages.get("gui.cache.cleanConfirmMessage", sizeLabel(bytes))),
+                "gui.cache.cleanSelected",
+                "material-warning-dialog",
+                true,
+                null,
+                null);
+    }
+
+    /// Removes the selected cache contents in the background.
+    ///
+    /// @param entries cached versions to remove.
+    /// @param partials whether incomplete files are removed as well.
+    /// @param settings settings dialog whose usage summary is refreshed afterwards.
+    private void cleanCache(List<ImageCacheEntry> entries, boolean partials, SettingsDialog settings) {
+        Task<ImageCacheCleanResult> task = new Task<>() {
+            /// Removes the selected cache contents outside the JavaFX application thread.
+            ///
+            /// @return removal result.
+            @Override
+            protected ImageCacheCleanResult call() {
+                ImageCacheService service = new ImageCacheService(services.directories());
+                ImageCacheCleanResult result = ImageCacheCleanResult.empty();
+                if (!entries.isEmpty()) {
+                    result = ImageCacheCleanResult.merge(result, service.cleanEntries(entries));
+                }
+                if (partials) {
+                    result = ImageCacheCleanResult.merge(result, service.cleanPartials());
+                }
+                return result;
+            }
+        };
+        startBackgroundTask(task, Messages.get("gui.dialog.cacheError"), result -> {
+            String message = Messages.get(
+                    "gui.cache.cleaned",
+                    sizeLabel(result.removedBytes()),
+                    result.removedFiles());
+            if (!result.skipped().isEmpty()) {
+                message = message + " "
+                        + Messages.get("gui.cache.cleanedSkipped", result.skipped().size());
+            }
+            showInfo(Messages.get("gui.cache.cleanedTitle"), message);
+            @Nullable ImageCacheUsage usage = readCacheUsage();
+            if (usage != null) {
+                settings.updateCacheUsage(usage);
+            }
+        });
     }
 
     /// Returns whether locale was explicitly configured with a JVM property.

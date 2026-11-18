@@ -924,13 +924,13 @@ public final class CliApplication implements Callable<Integer> {
 
                 ImageCacheCleanResult result = ImageCacheCleanResult.empty();
                 if (all) {
-                    result = mergeCleanResults(result, service.cleanAll());
+                    result = ImageCacheCleanResult.merge(result, service.cleanAll());
                 } else {
                     if (!selected.isEmpty()) {
-                        result = mergeCleanResults(result, service.cleanEntries(List.copyOf(selected)));
+                        result = ImageCacheCleanResult.merge(result, service.cleanEntries(List.copyOf(selected)));
                     }
                     if (partials) {
-                        result = mergeCleanResults(result, service.cleanPartials());
+                        result = ImageCacheCleanResult.merge(result, service.cleanPartials());
                     }
                 }
                 if (json) {
@@ -1005,22 +1005,6 @@ public final class CliApplication implements Callable<Integer> {
         return output;
     }
 
-    /// Merges two cache clean results.
-    ///
-    /// @param left first result.
-    /// @param right second result.
-    /// @return merged result.
-    private static ImageCacheCleanResult mergeCleanResults(ImageCacheCleanResult left, ImageCacheCleanResult right) {
-        if (right.removedBytes() == 0L && right.removedFiles() == 0 && right.skipped().isEmpty()) {
-            return left;
-        }
-        ArrayList<String> skipped = new ArrayList<>(left.skipped());
-        skipped.addAll(right.skipped());
-        return new ImageCacheCleanResult(
-                left.removedBytes() + right.removedBytes(),
-                left.removedFiles() + right.removedFiles(),
-                List.copyOf(skipped));
-    }
 
     /// Command group for block device operations.
     @Command(name = "device", description = "Inspect writable target devices.")

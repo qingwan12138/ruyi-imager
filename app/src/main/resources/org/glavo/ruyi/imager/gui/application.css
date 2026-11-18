@@ -824,3 +824,35 @@
     -fx-text-fill: #394756;
     -fx-border-color: #d9dde5;
 }
+
+.cache-content {
+    -fx-min-width: 520px;
+    -fx-pref-width: 520px;
+    -fx-max-width: 520px;
+    -fx-spacing: 10;
+    -fx-padding: 8 0 4 0;
+}
+
+.cache-tree-view {
+    -fx-pref-height: 340px;
+    -fx-background-radius: 8;
+}
+
+.cache-header {
+    -fx-alignment: center-left;
+}
+
+.cache-actions {
+    -fx-padding: 6 0 0 0;
+}
+.cache-actions .settings-action-button {
+    -fx-min-width: 112px;
+}
+.cache-empty {
+    -fx-padding: 48 0;
+    -fx-font-size: 13px;
+    -fx-text-fill: #5a6673;
+}
+.cache-header .settings-action-button {
+    -fx-min-width: 88px;
+}
