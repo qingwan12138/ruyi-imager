@@ -7,11 +7,14 @@ import io.github.palexdev.materialfx.controls.MFXButton;
 import io.github.palexdev.materialfx.controls.MFXComboBox;
 import io.github.palexdev.materialfx.controls.MFXProgressBar;
 import io.github.palexdev.materialfx.dialogs.MFXGenericDialogBuilder;
+import io.github.palexdev.materialfx.dialogs.MFXStageDialog;
+import io.github.palexdev.materialfx.dialogs.MFXStageDialogBuilder;
 import io.github.palexdev.materialfx.enums.FloatMode;
 import io.github.palexdev.materialfx.theming.JavaFXThemes;
 import io.github.palexdev.materialfx.theming.MaterialFXStylesheets;
 import io.github.palexdev.materialfx.theming.UserAgentBuilder;
 import javafx.animation.Animation;
+import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.scene.control.Button;
@@ -99,9 +102,14 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -293,6 +301,7 @@ public final class MainWindowJavaFxSmokeTest {
         Assumptions.assumeFalse(GraphicsEnvironment.isHeadless(), "JavaFX smoke tests require a graphics environment.");
         try {
             Platform.startup(() -> {
+                Platform.setImplicitExit(false);
                 UserAgentBuilder.builder()
                         .themes(JavaFXThemes.MODENA)
                         .themes(MaterialFXStylesheets.forAssemble(true))
@@ -1452,7 +1461,7 @@ public final class MainWindowJavaFxSmokeTest {
                 var start = MainWindow.class.getDeclaredMethod(
                         "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
                 start.setAccessible(true);
-                start.invoke(window, task, (Consumer<Void>) _ -> { }, (Consumer<Throwable>) _ -> { });
+                start.invoke(window, task, (Consumer<Void>) _ -> { }, (Consumer<@Nullable Throwable>) _ -> { });
                 return null;
             });
             assertTrue(finished.get(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS));
@@ -1687,7 +1696,7 @@ public final class MainWindowJavaFxSmokeTest {
                 var start = MainWindow.class.getDeclaredMethod(
                         "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
                 start.setAccessible(true);
-                start.invoke(window, task, (Consumer<Boolean>) _ -> { }, (Consumer<Throwable>) _ -> { });
+                start.invoke(window, task, (Consumer<Boolean>) _ -> { }, (Consumer<@Nullable Throwable>) _ -> { });
                 Button pause = assertInstanceOf(Button.class, windowField(window, "pauseDownloadButton"));
                 assertTrue(pause.isVisible());
                 assertTrue(pause.isDisabled());
@@ -1712,6 +1721,430 @@ public final class MainWindowJavaFxSmokeTest {
         }
     }
 
+    /// Declining the close confirmation keeps a running flash operation untouched.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void keepsFlashRunningWhenCloseIsDeclined(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch closed = new CountDownLatch(1);
+        try {
+            runOnJavaFxThread(() -> {
+                AtomicInteger confirmations = new AtomicInteger();
+                setWindowField(window, "flashInProgress", true);
+                setWindowField(window, "closeConfirmationOverride", (BooleanSupplier) () -> {
+                    confirmations.incrementAndGet();
+                    return false;
+                });
+                Task<Boolean> task = new Task<>() {
+                    /// Keeps the flash worker alive until the test releases it.
+                    ///
+                    /// @return whether the wait finished.
+                    /// @throws Exception when interrupted.
+                    @Override
+                    protected Boolean call() throws Exception {
+                        return release.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod(
+                        "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task, (Consumer<Boolean>) _ -> { }, (Consumer<@Nullable Throwable>) _ -> { });
+                assertFalse(window.requestClose(closed::countDown));
+                assertEquals(1, confirmations.get());
+                assertEquals(false, windowField(window, "cancellationRequested"));
+                assertNull(windowField(window, "pendingCloseAction"));
+                return null;
+            });
+            assertFalse(closed.await(300L, TimeUnit.MILLISECONDS));
+        } finally {
+            release.countDown();
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Confirming the close request cancels the flash operation and defers the close until it stops.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void cancelsFlashWhenCloseIsConfirmed(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch closed = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        try {
+            runOnJavaFxThread(() -> {
+                setWindowField(window, "flashInProgress", true);
+                setWindowField(window, "closeConfirmationOverride", (BooleanSupplier) () -> true);
+                Task<Boolean> task = new Task<>() {
+                    /// Ignores the close interrupt until the test releases the worker.
+                    ///
+                    /// @return whether the wait finished.
+                    /// @throws Exception when the wait fails.
+                    @Override
+                    protected Boolean call() throws Exception {
+                        while (true) {
+                            try {
+                                release.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                                return true;
+                            } catch (InterruptedException _) {
+                                interrupted.countDown();
+                                // Keep working so the deferred close stays pending.
+                            }
+                        }
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod(
+                        "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task, (Consumer<Boolean>) _ -> { }, (Consumer<@Nullable Throwable>) _ -> { });
+                assertFalse(window.requestClose(closed::countDown));
+                assertEquals(true, windowField(window, "cancellationRequested"));
+                assertNotNull(windowField(window, "pendingCloseAction"));
+                return null;
+            });
+            // The worker still runs, so the deferred close must not run yet.
+            assertTrue(interrupted.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            assertFalse(closed.await(300L, TimeUnit.MILLISECONDS));
+            release.countDown();
+            assertTrue(closed.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// A flash operation that is already being cancelled closes without another question.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void defersCloseWithoutAskingWhenFlashIsCancelling(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch closed = new CountDownLatch(1);
+        try {
+            runOnJavaFxThread(() -> {
+                AtomicInteger confirmations = new AtomicInteger();
+                setWindowField(window, "flashInProgress", true);
+                setWindowField(window, "closeConfirmationOverride", (BooleanSupplier) () -> {
+                    confirmations.incrementAndGet();
+                    return true;
+                });
+                Task<Boolean> task = new Task<>() {
+                    /// Keeps the cancelled worker alive until the test releases it.
+                    ///
+                    /// @return whether the wait finished.
+                    /// @throws Exception when interrupted.
+                    @Override
+                    protected Boolean call() throws Exception {
+                        return release.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod(
+                        "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task, (Consumer<Boolean>) _ -> { }, (Consumer<@Nullable Throwable>) _ -> { });
+                setWindowField(window, "cancellationRequested", true);
+                assertFalse(window.requestClose(closed::countDown));
+                assertEquals(0, confirmations.get());
+                assertNotNull(windowField(window, "pendingCloseAction"));
+                return null;
+            });
+            assertFalse(closed.await(300L, TimeUnit.MILLISECONDS));
+        } finally {
+            release.countDown();
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
+
+    /// Dismisses a real close confirmation when the flash finishes and keeps the window open.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void dismissesCloseConfirmationWhenFlashFinishes(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Stage owner = runOnJavaFxThread(() -> {
+            Stage stage = new Stage();
+            stage.setOpacity(0);
+            stage.setScene(new Scene(window.root()));
+            stage.show();
+            return stage;
+        });
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean resultDelivered = new AtomicBoolean();
+        AtomicBoolean dialogObserved = new AtomicBoolean();
+        AtomicReference<@Nullable Throwable> failure = new AtomicReference<>();
+        try {
+            runOnJavaFxThread(() -> {
+                setWindowField(window, "flashInProgress", true);
+                Task<Boolean> task = new Task<>() {
+                    /// Keeps the worker alive until the releaser thread answers.
+                    ///
+                    /// @return whether the wait finished.
+                    /// @throws Exception when interrupted.
+                    @Override
+                    protected Boolean call() throws Exception {
+                        return release.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod(
+                        "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task,
+                        (Consumer<Boolean>) _ -> resultDelivered.set(true),
+                        (Consumer<@Nullable Throwable>) _ -> resultDelivered.set(true));
+                return null;
+            });
+            Thread releaser = new Thread(() -> {
+                try {
+                    for (int attempt = 0; attempt < 100 && !dialogObserved.get(); attempt++) {
+                        Thread.sleep(50L);
+                        dialogObserved.set(runOnJavaFxThread(
+                                () -> windowField(window, "interruptConfirmationDialog") != null));
+                    }
+                } catch (Exception exception) {
+                    failure.set(exception);
+                } finally {
+                    release.countDown();
+                }
+            }, "close-confirmation-releaser");
+            releaser.start();
+
+            boolean closed = runOnJavaFxThread(() -> window.requestClose(() -> { }));
+
+            assertNull(failure.get());
+            assertFalse(closed);
+            assertTrue(dialogObserved.get(), "the close confirmation should have been shown");
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(FX_TIMEOUT_SECONDS);
+            while (!resultDelivered.get() && System.nanoTime() < deadline) {
+                Thread.sleep(20L);
+            }
+            assertTrue(resultDelivered.get(), "the flash result should have been reported");
+            runOnJavaFxThread(() -> {
+                assertNull(windowField(window, "interruptConfirmationDialog"));
+                assertEquals(false, windowField(window, "closing"));
+                return null;
+            });
+        } finally {
+            release.countDown();
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                owner.hide();
+                return null;
+            });
+        }
+    }
+
+    /// Pressing Enter in the real close confirmation keeps the flash running.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void enterKeepsFlashRunningFromRealConfirmation(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Stage owner = runOnJavaFxThread(() -> {
+            Stage stage = new Stage();
+            stage.setOpacity(0);
+            stage.setScene(new Scene(window.root()));
+            stage.show();
+            return stage;
+        });
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean interrupted = new AtomicBoolean();
+        try {
+            Thread worker = runOnJavaFxThread(() -> {
+                setWindowField(window, "flashInProgress", true);
+                Task<Boolean> task = new Task<>() {
+                    /// Waits for the test to release the worker and records any interruption.
+                    ///
+                    /// @return whether the worker was released normally.
+                    /// @throws InterruptedException when the worker receives an interrupt.
+                    @Override
+                    protected Boolean call() throws InterruptedException {
+                        started.countDown();
+                        try {
+                            release.await();
+                            return true;
+                        } catch (InterruptedException exception) {
+                            interrupted.set(true);
+                            throw exception;
+                        }
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod(
+                        "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task,
+                        (Consumer<Boolean>) _ -> { },
+                        (Consumer<@Nullable Throwable>) _ -> { });
+                @Nullable Thread background = (Thread) windowField(window, "currentBackgroundThread");
+                assertNotNull(background);
+                return background;
+            });
+            assertTrue(started.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS), "the flash worker should start");
+
+            boolean closed = requestCloseWithEnter(window, () -> { }, _ -> { });
+
+            assertFalse(closed);
+            assertTrue(worker.isAlive(), "the flash worker should still be running");
+            assertFalse(worker.isInterrupted(), "the flash worker should not have a pending interrupt");
+            assertFalse(interrupted.get(), "the flash worker should not have received an interrupt");
+            assertEquals(false, windowField(window, "cancellationRequested"));
+            assertNull(windowField(window, "pendingCloseAction"));
+            runOnJavaFxThread(() -> {
+                assertNull(window.interruptConfirmationContent());
+                assertEquals(false, windowField(window, "closing"));
+                return null;
+            });
+        } finally {
+            release.countDown();
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                owner.hide();
+                return null;
+            });
+        }
+    }
+
+    /// Pressing Enter on the explicit exit action cancels the flash and defers the close.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void enterOnExitButtonCancelsFlash(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        Stage owner = runOnJavaFxThread(() -> {
+            Stage stage = new Stage();
+            stage.setOpacity(0);
+            stage.setScene(new Scene(window.root()));
+            stage.show();
+            return stage;
+        });
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch closed = new CountDownLatch(1);
+        try {
+            runOnJavaFxThread(() -> {
+                setWindowField(window, "flashInProgress", true);
+                Task<Boolean> task = new Task<>() {
+                    /// Keeps the worker alive after an interrupt so the close stays pending.
+                    ///
+                    /// @return whether the wait finished.
+                    /// @throws Exception when the wait fails.
+                    @Override
+                    protected Boolean call() throws Exception {
+                        while (true) {
+                            try {
+                                release.await();
+                                return true;
+                            } catch (InterruptedException _) {
+                                // Keep working so the deferred close stays pending.
+                            }
+                        }
+                    }
+                };
+                var start = MainWindow.class.getDeclaredMethod(
+                        "startBackgroundTask", Task.class, Consumer.class, Consumer.class);
+                start.setAccessible(true);
+                start.invoke(window, task,
+                        (Consumer<Boolean>) _ -> { },
+                        (Consumer<@Nullable Throwable>) _ -> { });
+                return null;
+            });
+
+            boolean closedRequest = requestCloseWithEnter(window, closed::countDown, content -> {
+                @Nullable Node exit = content.lookupAll(".dialog-secondary-button").stream()
+                        .filter(Button.class::isInstance)
+                        .findFirst()
+                        .orElse(null);
+                assertNotNull(exit, "the close confirmation should have an explicit exit button");
+                exit.requestFocus();
+            });
+            assertFalse(closedRequest);
+
+            assertEquals(true, windowField(window, "cancellationRequested"));
+            assertNotNull(windowField(window, "pendingCloseAction"));
+            release.countDown();
+            assertTrue(closed.await(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                owner.hide();
+                return null;
+            });
+        }
+    }
+
+    /// Opens the close confirmation and sends Enter from its nested JavaFX event loop.
+    ///
+    /// @param window window under test.
+    /// @param closeAction action to run when the window may close.
+    /// @param beforeEnter action to run on the dialog before sending Enter.
+    /// @return whether the close request was accepted immediately.
+    /// @throws Exception when opening the confirmation or sending Enter fails.
+    private static boolean requestCloseWithEnter(
+            MainWindow window, Runnable closeAction, Consumer<Node> beforeEnter) throws Exception {
+        FutureTask<Boolean> enter = new FutureTask<>(() -> {
+            @Nullable Node content = window.interruptConfirmationContent();
+            assertNotNull(content, "the close confirmation should be shown");
+            beforeEnter.accept(content);
+            content.fireEvent(keyPressed(KeyCode.ENTER));
+            return true;
+        });
+        FutureTask<Boolean> close = new FutureTask<>(() -> {
+            Platform.runLater(enter);
+            return window.requestClose(closeAction);
+        });
+        Platform.runLater(close);
+        // Wait for the key action first so its failure can surface while the dialog is still open.
+        awaitJavaFxAction(enter);
+        return awaitJavaFxAction(close);
+    }
+
+    /// Keeps the window open when the flash thread stopped before its result was handled.
+    ///
+    /// @param directory isolated application state directory.
+    /// @throws Exception when the JavaFX action fails.
+    @Test
+    public void keepsWindowWhenFlashThreadJustStopped(@TempDir Path directory) throws Exception {
+        MainWindow window = runOnJavaFxThread(() -> new MainWindow(testServices(directory)));
+        try {
+            runOnJavaFxThread(() -> {
+                Thread finished = new Thread(() -> { });
+                finished.start();
+                finished.join(FX_TIMEOUT_SECONDS * 1000L);
+                setWindowField(window, "flashInProgress", true);
+                setWindowField(window, "currentBackgroundThread", finished);
+                setWindowField(window, "closeConfirmationOverride", (BooleanSupplier) () -> true);
+                CountDownLatch closed = new CountDownLatch(1);
+                assertFalse(window.requestClose(closed::countDown));
+                assertEquals(false, windowField(window, "closing"));
+                assertNull(windowField(window, "pendingCloseAction"));
+                assertEquals(1L, closed.getCount());
+                return null;
+            });
+        } finally {
+            runOnJavaFxThread(() -> {
+                window.shutdown();
+                return null;
+            });
+        }
+    }
     /// Asserts that two laid-out nodes have disjoint vertical bounds in scene coordinates.
     ///
     /// @param upper node expected above the other node.
@@ -1741,10 +2174,20 @@ public final class MainWindowJavaFxSmokeTest {
             }
         });
 
+        return awaitJavaFxAction(future);
+    }
+
+    /// Waits for a JavaFX action and rethrows its original failure on the test thread.
+    ///
+    /// @param future completion of the action.
+    /// @param <T> action result type.
+    /// @return action result.
+    /// @throws Exception when the action fails.
+    private static <T> T awaitJavaFxAction(Future<T> future) throws Exception {
         try {
             return future.get(FX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
+            @Nullable Throwable cause = e.getCause();
             if (cause instanceof Exception exception) {
                 throw exception;
             }

@@ -116,6 +116,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 import org.slf4j.Logger;
@@ -346,6 +347,18 @@ public final class MainWindow {
 
     /// Action that closes the stage after an active flash worker has stopped, or null when no close is pending.
     private @Nullable Runnable pendingCloseAction;
+
+    /// Overrides the close-confirmation answer, used by tests; null asks the user.
+    private @Nullable BooleanSupplier closeConfirmationOverride;
+
+    /// Open interruption confirmation dialog, or null when none is shown.
+    private @Nullable MFXStageDialog interruptConfirmationDialog;
+
+    /// Content of the open interruption confirmation, or null when none is shown.
+    private @Nullable Node interruptConfirmationContent;
+
+    /// Whether the open interruption confirmation was dismissed because its operation stopped.
+    private boolean interruptConfirmationDismissed;
 
     /// Creates the main window.
     ///
@@ -2472,7 +2485,8 @@ public final class MainWindow {
     /// confirmation first; declining keeps the window open and restarts update scheduling, while accepting interrupts
     /// the download worker and stores the close action so the partial file is released before the window closes. When
     /// flashing is active, it stores the close action, requests cancellation, and returns `false`; the action runs
-    /// after the flash worker and any elevated helper cleanup have completed.
+    /// after the flash worker and any elevated helper cleanup have completed. Flashing also asks for confirmation
+    /// first; declining keeps the window open, restarts update scheduling, and leaves the flash operation running.
     ///
     /// @param closeAction action that retries closing the stage.
     /// @return whether the stage may close immediately.
@@ -2500,14 +2514,55 @@ public final class MainWindow {
             activeThread.interrupt();
             return false;
         }
-        if (!flashInProgress || thread == null || !thread.isAlive()) {
+        if (!flashInProgress || thread == null) {
             return true;
         }
-
-        if (pendingCloseAction == null) {
-            LOGGER.info("Deferring main window close until the flash operation stops.");
-            pendingCloseAction = closeAction;
+        if (!thread.isAlive()) {
+            LOGGER.info("Flash operation finished while a close was requested.");
+            closing = false;
+            restartApplicationUpdateChecks();
+            refreshState();
+            return false;
         }
+        if (pendingCloseAction != null) {
+            LOGGER.info("Main window close is already pending for the flash operation.");
+            return false;
+        }
+        if (cancellationRequested) {
+            LOGGER.info("Deferring main window close until the cancelled flash operation stops.");
+            pendingCloseAction = closeAction;
+            return false;
+        }
+        if (interruptConfirmationDialog != null) {
+            LOGGER.info("A close confirmation is already shown; ignoring the repeated close request.");
+            return false;
+        }
+        boolean exitConfirmed = confirmCloseDuringFlash();
+        if (interruptConfirmationDismissed) {
+            interruptConfirmationDismissed = false;
+            LOGGER.info("Main window close cancelled because the flash operation stopped.");
+            closing = false;
+            restartApplicationUpdateChecks();
+            refreshState();
+            return false;
+        }
+        if (!exitConfirmed) {
+            LOGGER.info("Main window close cancelled during an active flash operation.");
+            closing = false;
+            restartApplicationUpdateChecks();
+            refreshState();
+            return false;
+        }
+        @Nullable Thread activeThread = currentBackgroundThread;
+        if (!flashInProgress || activeThread == null || !activeThread.isAlive()) {
+            LOGGER.info("Flash operation finished while the close confirmation was shown.");
+            closing = false;
+            restartApplicationUpdateChecks();
+            refreshState();
+            return false;
+        }
+        LOGGER.info("Deferring main window close until the flash operation stops.");
+        pendingCloseAction = closeAction;
         requestFlashCancellation();
         return false;
     }
@@ -2523,6 +2578,112 @@ public final class MainWindow {
         LOGGER.info("Restarting scheduled application update checks after a declined close request.");
         applicationUpdateTimer.setCycleCount(Animation.INDEFINITE);
         applicationUpdateTimer.play();
+    }
+
+    /// Asks whether to close the window while a flash operation is active.
+    ///
+    /// @return whether the user chose to exit and interrupt the flash operation.
+    private boolean confirmCloseDuringFlash() {
+        @Nullable BooleanSupplier override = closeConfirmationOverride;
+        if (override != null) {
+            return override.getAsBoolean();
+        }
+        return showInterruptConfirmation(
+                Messages.get("gui.dialog.flashRunning"),
+                Messages.get("gui.dialog.flashRunning"),
+                messageContent(Messages.get("gui.dialog.flashRunning.message")),
+                "gui.button.continueFlash",
+                "gui.button.exit",
+                "material-warning-dialog");
+    }
+
+    /// Asks whether to interrupt a long-running operation.
+    ///
+    /// The safe action is the primary button, and closing the dialog with Escape keeps the operation
+    /// running, so only an explicit choice of the interrupt action returns `true`.
+    ///
+    /// @param title dialog title.
+    /// @param header dialog header.
+    /// @param content dialog content.
+    /// @param keepKey message key of the action that keeps the operation running.
+    /// @param interruptKey message key of the action that interrupts the operation.
+    /// @param styleClass dialog style class.
+    /// @return whether the user explicitly chose to interrupt the operation.
+    private boolean showInterruptConfirmation(
+            String title,
+            String header,
+            Node content,
+            String keepKey,
+            String interruptKey,
+            String styleClass) {
+        AtomicBoolean interrupted = new AtomicBoolean();
+        MFXButton keepButton = dialogActionButton(keepKey, "dialog-primary-button");
+        MFXButton interruptButton = dialogActionButton(interruptKey, "dialog-secondary-button");
+        MFXGenericDialogBuilder dialogBuilder = MFXGenericDialogBuilder.build()
+                .setHeaderText(header)
+                .setContent(content)
+                .setShowClose(false)
+                .setShowMinimize(false)
+                .setShowAlwaysOnTop(false)
+                .addStyleClasses("material-dialog", styleClass)
+                .addActions(interruptButton, keepButton);
+        @Nullable String stylesheet = applicationStylesheet();
+        if (stylesheet != null) {
+            dialogBuilder.addStylesheets(stylesheet);
+        }
+        MFXGenericDialog dialogContent = dialogBuilder.get();
+        MFXStageDialogBuilder builder = MFXStageDialogBuilder.build()
+                .setContent(dialogContent)
+                .setOwnerNode(root)
+                .setCenterInOwnerNode(true)
+                .setScrimOwner(true)
+                .setScrimStrength(0.35)
+                .setDraggable(true)
+                .setOverlayClose(false)
+                .initModality(Modality.WINDOW_MODAL)
+                .setTitle(title);
+        @Nullable Window owner = ownerWindow();
+        if (owner != null) {
+            builder.initOwner(owner);
+        }
+        MFXStageDialog dialog = builder.get();
+        keepButton.setOnAction(_ -> dialog.close());
+        interruptButton.setOnAction(_ -> {
+            interrupted.set(true);
+            dialog.close();
+        });
+        installDialogKeyHandling(dialogContent, dialog::close, keepButton::fire);
+        dialog.setOnShown(_ -> requestInitialDialogFocus(content, keepButton));
+        interruptConfirmationDismissed = false;
+        interruptConfirmationDialog = dialog;
+        interruptConfirmationContent = dialogContent;
+        try {
+            dialog.showAndWait();
+        } finally {
+            interruptConfirmationDialog = null;
+            interruptConfirmationContent = null;
+        }
+        dialog.dispose();
+        return interrupted.get();
+    }
+
+    /// Returns the content of the close confirmation currently shown for the flash.
+    ///
+    /// @return confirmation content node, or null when no confirmation is shown.
+    @Nullable Node interruptConfirmationContent() {
+        return interruptConfirmationContent;
+    }
+
+    /// Dismisses an interruption confirmation whose operation has already stopped.
+    private void dismissInterruptConfirmation() {
+        @Nullable MFXStageDialog dialog = interruptConfirmationDialog;
+        if (dialog == null) {
+            return;
+        }
+        LOGGER.info("Dismissing the close confirmation because the background operation stopped.");
+        interruptConfirmationDismissed = true;
+        interruptConfirmationDialog = null;
+        dialog.close();
     }
 
     /// Asks whether to close the window while an image download is active.
@@ -2620,6 +2781,7 @@ public final class MainWindow {
     ///
     /// @return whether a deferred close action was run.
     private boolean finishBackgroundTask() {
+        dismissInterruptConfirmation();
         @Nullable Runnable closeAction = pendingCloseAction;
         pendingCloseAction = null;
         statusLabel.textProperty().unbind();
@@ -4195,19 +4357,17 @@ public final class MainWindow {
         return decision.get();
     }
 
-    /// Shows a MaterialFX dialog.
+    /// Shows a modal dialog with a cancel action.
     ///
     /// @param title dialog title.
     /// @param header dialog header.
     /// @param content dialog content.
-    /// @param confirmKey confirm button message key.
+    /// @param confirmKey message key of the confirm action.
     /// @param styleClass dialog style class.
-    /// @param showCancel whether to show a cancel action.
-    /// @param doubleClickSelectionView list or tree view that confirms the dialog when an item is
-    ///        double-clicked, or null to keep confirmation on the confirm button only.
-    /// @param canConfirm whether the dialog can be confirmed with the current selection, or null
-    ///        when the dialog has no selection to satisfy.
-    /// @return whether the user accepted the dialog.
+    /// @param showCancel whether to show the cancel action.
+    /// @param doubleClickSelectionView selection view that accepts the dialog on double click, or null.
+    /// @param canConfirm whether the confirm action is enabled, or null when it is always enabled.
+    /// @return whether the confirm action was chosen.
     private boolean showMaterialDialog(
             String title,
             String header,
