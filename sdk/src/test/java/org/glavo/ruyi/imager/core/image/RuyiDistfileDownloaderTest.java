@@ -11,6 +11,7 @@ import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.repo.RuyiRepositoryStore;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -24,7 +25,9 @@ import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
+import java.nio.file.attribute.UserDefinedFileAttributeView;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -81,6 +84,64 @@ public final class RuyiDistfileDownloaderTest {
         }
     }
 
+    /// Keeps a completed archive separate from another archive's resume file.
+    @Test
+    public void preservesArchiveWithReservedPartialName(@TempDir Path root) throws Exception {
+        byte[] downloaded = "remote".getBytes(StandardCharsets.UTF_8);
+        byte[] retained = "existing archive".getBytes(StandardCharsets.UTF_8);
+        try (TinyHttpServer server = new TinyHttpServer(downloaded)) {
+            Path cache = root.resolve("cache");
+            Path directory = Files.createDirectories(cache.resolve("downloads/test/board-image/combo/1"));
+            Path existing = Files.write(directory.resolve("root.part"), retained);
+            Path reservedDirectoryName = Files.write(directory.resolve(".download-partials-0"), retained);
+            var first = new RuyiDistfile("root", List.of(server.uri("/root")), (long) downloaded.length,
+                    Map.of("sha256", sha256(downloaded)), false, false, null, 0, List.of(), "raw");
+            var second = new RuyiDistfile("root.part", List.of(), (long) retained.length,
+                    Map.of("sha256", sha256(retained)), true, false, null, 0, List.of(), "raw");
+            var third = new RuyiDistfile(".download-partials-0", List.of(), (long) retained.length,
+                    Map.of("sha256", sha256(retained)), true, false, null, 0, List.of(), "raw");
+            var image = new ImageEntry("test", "board-image", "combo", "1", null, "board-image/combo", "Combo",
+                    "Vendor", "board", "generic", "dd-v1", Map.of("disk", "root"),
+                    List.of(first, second, third), StrategySupport.SUPPORTED);
+            var directories = new AppDirectories(root.resolve("config"), cache);
+            var service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+
+            assertTrue(service.prepareLocalImage(image, List.of(), true, NO_PROGRESS).isEmpty());
+            assertArrayEquals(downloaded, Files.readAllBytes(directory.resolve("root")));
+            assertArrayEquals(retained, Files.readAllBytes(existing));
+            assertArrayEquals(retained, Files.readAllBytes(reservedDirectoryName));
+            assertEquals(List.of(), server.rangeRequests());
+        }
+    }
+
+    /// Marker write failure still permits a source attempt and leaves no fresh empty partial.
+    @Test
+    public void attemptsSourceEvenWhenPartialMarkerCannotBeWritten(@TempDir Path root) throws Exception {
+        byte[] payload = "too long".getBytes(StandardCharsets.UTF_8);
+        try (TinyHttpServer server = new TinyHttpServer(payload)) {
+            Path cache = root.resolve("cache");
+            Path directory = Files.createDirectories(cache.resolve("downloads/test/board-image/image/1"));
+            Path partial = directory.resolve("root.part");
+            Path markerDirectory = Files.createDirectories(cache.resolve(ImageCacheMarkers.DIRECTORY));
+            Path marker = ImageCacheMarkers.markerPath(markerDirectory, cache.relativize(partial));
+            Files.createDirectory(marker);
+            RuyiDistfile distfile = new RuyiDistfile(
+                    "root", List.of(server.uri("/root")), 1L, Map.of("sha256", sha256(new byte[1])),
+                    false, false, null, 0, List.of(), "raw");
+
+            var directories = new AppDirectories(root.resolve("config"), cache);
+            var service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+            var image = new ImageEntry("test", "board-image", "image", "1", null, "board-image/image", "Image",
+                    "Vendor", "board", "generic", "dd-v1", Map.of("disk", "root"),
+                    List.of(distfile), StrategySupport.SUPPORTED);
+            assertThrows(IOException.class, () -> service.downloadImage(image, NO_PROGRESS));
+
+            assertEquals(1, server.requests.get());
+            assertFalse(Files.exists(partial));
+            assertFalse(Files.exists(directory.resolve("root")));
+        }
+    }
+
     /// Verifies that a distfile can be downloaded and verified.
     ///
     /// @param temporaryDirectory temporary test directory.
@@ -106,6 +167,83 @@ public final class RuyiDistfileDownloaderTest {
             assertEquals(temporaryDirectory.resolve("image.raw"), result);
             assertArrayEquals(content, Files.readAllBytes(result));
             assertEquals(List.of(), server.rangeRequests());
+        }
+    }
+
+    /// Resuming from a hard-linked partial preserves the other name's bytes.
+    @Test
+    public void resumesWithoutWritingToAnExistingHardLink(@TempDir Path directory) throws Exception {
+        byte[] content = new byte[1024];
+        Arrays.fill(content, (byte) 7);
+        byte[] prefix = Arrays.copyOf(content, 128);
+        Path original = Files.write(directory.resolve("preserved.raw"), prefix);
+        try {
+            Files.createLink(directory.resolve("image.raw.part"), original);
+            Path staging = Files.createDirectory(directory.resolve(
+                    RuyiDistfileDownloader.DOWNLOAD_PARTIAL_DIRECTORY_PREFIX + "leftover"));
+            Files.createLink(staging.resolve("resume"), original);
+        } catch (IOException | UnsupportedOperationException _) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "hard links are unavailable");
+        }
+        try (TinyHttpServer server = new TinyHttpServer(content)) {
+            RuyiDistfile distfile = new RuyiDistfile("image.raw", List.of(server.uri("/image.raw")),
+                    (long) content.length, Map.of("sha256", sha256(content)), false, true, null, 0, List.of(), "raw");
+
+            Path result = new RuyiDistfileDownloader().download(distfile, directory, NO_PROGRESS);
+
+            assertArrayEquals(content, Files.readAllBytes(result));
+            assertArrayEquals(prefix, Files.readAllBytes(original));
+            assertEquals(List.of("bytes=128-"), server.rangeRequests());
+        }
+    }
+
+    /// Resumes an unshared partial in place on a file system supporting named attributes.
+    @Test
+    public void reusesAnUnsharedPartial(@TempDir Path directory) throws Exception {
+        byte[] content = new byte[1024];
+        Arrays.fill(content, (byte) 7);
+        Path partial = Files.write(directory.resolve("image.raw.part"), Arrays.copyOf(content, 128));
+        var attributes = Files.getFileAttributeView(partial, UserDefinedFileAttributeView.class);
+        org.junit.jupiter.api.Assumptions.assumeTrue(attributes != null, "named attributes are unavailable");
+        try {
+            attributes.write("resume-test", ByteBuffer.wrap(new byte[]{1}));
+        } catch (IOException | UnsupportedOperationException _) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "named attributes are unavailable");
+        }
+
+        try (TinyHttpServer server = new TinyHttpServer(content)) {
+            RuyiDistfile distfile = new RuyiDistfile("image.raw", List.of(server.uri("/image.raw")),
+                    (long) content.length, Map.of("sha256", sha256(content)), false, true, null, 0, List.of(), "raw");
+
+            Path result = new RuyiDistfileDownloader().download(distfile, directory, NO_PROGRESS);
+
+            assertArrayEquals(content, Files.readAllBytes(result));
+            assertEquals(List.of("bytes=128-"), server.rangeRequests());
+            assertTrue(Files.getFileAttributeView(result, UserDefinedFileAttributeView.class).list().contains("resume-test"));
+            try (var siblings = Files.list(directory)) {
+                assertEquals(List.of(result), siblings.toList());
+            }
+        }
+    }
+
+    /// Refuses to open a linked partial for writing.
+    @Test
+    public void leavesSymbolicPartialTargetUnchanged(@TempDir Path directory) throws Exception {
+        byte[] content = new byte[1024];
+        byte[] prefix = Arrays.copyOf(content, 128);
+        Path original = Files.write(directory.resolve("preserved.raw"), prefix);
+        try {
+            Files.createSymbolicLink(directory.resolve("image.raw.part"), original);
+        } catch (IOException | UnsupportedOperationException _) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "symbolic links are unavailable");
+        }
+        try (TinyHttpServer server = new TinyHttpServer(content)) {
+            RuyiDistfile distfile = new RuyiDistfile("image.raw", List.of(server.uri("/image.raw")),
+                    (long) content.length, Map.of("sha256", sha256(content)), false, true, null, 0, List.of(), "raw");
+
+            assertThrows(IOException.class, () -> new RuyiDistfileDownloader().download(distfile, directory, NO_PROGRESS));
+            assertArrayEquals(prefix, Files.readAllBytes(original));
+            assertTrue(server.rangeRequests().isEmpty());
         }
     }
 
@@ -400,6 +538,86 @@ public final class RuyiDistfileDownloaderTest {
         assertEquals(
                 target,
                 new RuyiDistfileDownloader().download(distfile, temporaryDirectory, NO_PROGRESS));
+    }
+
+    /// P2:258 NFC/NFD 等价的归档名也会让续传名改用隔离目录，避免续传解析到正式归档。
+    @Test
+    public void isolatesResumeNameFromUnicodeEquivalentArchive(@TempDir Path directory) throws Exception {
+        Path version = Files.createDirectories(directory.resolve("version"));
+        RuyiDistfile candidate = new RuyiDistfile(
+                "cafe\u0301.raw", List.of(), null, Map.of(), false, false, null, 0, List.of(), "raw");
+        // 正式归档以 NFC 拼写声明，且其名称正好等于 NFC 形式的分片名。
+        RuyiDistfile equivalent = new RuyiDistfile(
+                "caf\u00e9.raw.part", List.of(), null, Map.of(), false, false, null, 0, List.of(), "raw");
+        RuyiDistfile unrelated = new RuyiDistfile(
+                "other.raw.part", List.of(), null, Map.of(), false, false, null, 0, List.of(), "raw");
+
+        assertEquals(version.resolve("cafe\u0301.raw.part"),
+                RuyiDistfileDownloader.partialPath(candidate, version, List.of(unrelated)));
+
+        Path reserved = RuyiDistfileDownloader.partialPath(candidate, version, List.of(equivalent));
+        assertEquals(version.resolve(RuyiDistfileDownloader.DOWNLOAD_PARTIAL_DIRECTORY_PREFIX + "0"),
+                reserved.getParent());
+        assertEquals("cafe\u0301.raw.part", reserved.getFileName().toString());
+    }
+
+    /// P2:503 独占的续传文件原位追加：不复制已下载前缀，也不更换文件身份。
+    @Test
+    public void resumesExclusivePartialInPlace(@TempDir Path directory) throws Exception {
+        byte[] content = new byte[4096];
+        for (int index = 0; index < content.length; index++) {
+            content[index] = (byte) index;
+        }
+        Path partial = Files.write(directory.resolve("image.raw.part"), Arrays.copyOf(content, 1024));
+        @Nullable Object identity = Files.readAttributes(partial, java.nio.file.attribute.BasicFileAttributes.class)
+                .fileKey();
+        try (TinyHttpServer server = new TinyHttpServer(content)) {
+            RuyiDistfile distfile = new RuyiDistfile("image.raw", List.of(server.uri("/image.raw")),
+                    (long) content.length, Map.of("sha256", sha256(content)), false, true, null, 0, List.of(), "raw");
+
+            Path result = new RuyiDistfileDownloader().download(distfile, directory, NO_PROGRESS);
+
+            assertArrayEquals(content, Files.readAllBytes(result));
+            assertEquals(List.of("bytes=1024-"), server.rangeRequests());
+            if (identity != null) {
+                assertEquals(identity, Files.readAttributes(result, java.nio.file.attribute.BasicFileAttributes.class)
+                        .fileKey());
+            }
+        }
+    }
+
+    /// P2:503 上次异常退出留下的私有续传硬链接会被复用，而不是复制已下载前缀。
+    @Test
+    public void reusesLeftoverResumeLinkWithoutCopyingPrefix(@TempDir Path directory) throws Exception {
+        byte[] content = new byte[4096];
+        Arrays.fill(content, (byte) 3);
+        Path partial = Files.write(directory.resolve("image.raw.part"), Arrays.copyOf(content, 1024));
+        Path staging = Files.createDirectory(
+                directory.resolve(RuyiDistfileDownloader.DOWNLOAD_PARTIAL_DIRECTORY_PREFIX + "0"));
+        try {
+            Files.createLink(staging.resolve("resume"), partial);
+        } catch (IOException | UnsupportedOperationException _) {
+            Assumptions.assumeTrue(false, "hard links are unavailable");
+        }
+        @Nullable Object identity = Files.readAttributes(partial, java.nio.file.attribute.BasicFileAttributes.class)
+                .fileKey();
+        try (TinyHttpServer server = new TinyHttpServer(content)) {
+            RuyiDistfile distfile = new RuyiDistfile("image.raw", List.of(server.uri("/image.raw")),
+                    (long) content.length, Map.of("sha256", sha256(content)), false, true, null, 0, List.of(), "raw");
+
+            Path result = new RuyiDistfileDownloader().download(distfile, directory, NO_PROGRESS);
+
+            assertArrayEquals(content, Files.readAllBytes(result));
+            assertEquals(List.of("bytes=1024-"), server.rangeRequests());
+            if (identity != null) {
+                assertEquals(identity, Files.readAttributes(result, java.nio.file.attribute.BasicFileAttributes.class)
+                        .fileKey());
+            }
+            assertFalse(Files.exists(staging));
+            try (var siblings = Files.list(directory)) {
+                assertEquals(List.of(result), siblings.toList());
+            }
+        }
     }
 
     /// Computes a SHA-256 digest for bytes.

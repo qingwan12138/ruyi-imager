@@ -383,7 +383,7 @@ public final class RuyiImageMaterializerTest {
                 NO_PROGRESS));
         assertFalse(Files.exists(artifactDirectory));
         try (var children = Files.list(temporaryDirectory)) {
-            assertFalse(children.anyMatch(path -> path.getFileName().toString().startsWith("artifacts.tmp-")));
+            assertFalse(children.anyMatch(path -> path.getFileName().toString().startsWith(".staging-artifacts-")));
         }
     }
 

@@ -9,12 +9,13 @@ import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.repo.RuyiRepositoryStore;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Unmodifiable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.nio.channels.FileChannel;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -82,6 +83,39 @@ final class LocalImageImportTest {
         assertNoStaging(cache(root, image));
     }
 
+    /// Stages each copy on the destination filesystem and publishes only verified archives.
+    @Test
+    void stagesImportsBesideDestination(@TempDir Path root) throws Exception {
+        Path source = Files.writeString(root.resolve("source"), "shared disk content");
+        ImageEntry image = image("image", List.of(file("first.img", source, true), file("second.img", source, true)));
+        Path directory = cache(root, image);
+        AtomicInteger copies = new AtomicInteger();
+        var service = service(root);
+
+        assertTrue(service.prepareLocalImage(image, List.of(source), false, event -> {
+            if (!event.stage().equals("import")) {
+                return;
+            }
+            try (var entries = Files.list(directory)) {
+                @Unmodifiable List<Path> versionEntries = entries.toList();
+                assertEquals(1, versionEntries.size());
+                Path staging = versionEntries.getFirst();
+                assertTrue(Files.isDirectory(staging));
+                assertTrue(staging.getFileName().toString()
+                        .startsWith(RuyiImageCatalogService.IMPORT_STAGING_DIRECTORY_PREFIX));
+                try (var files = Files.list(staging)) {
+                    assertEquals(copies.incrementAndGet(), files.count());
+                }
+            } catch (IOException failure) {
+                throw new UncheckedIOException(failure);
+            }
+        }).isEmpty());
+        assertEquals(2, copies.get());
+        assertEquals("shared disk content", Files.readString(directory.resolve("first.img")));
+        assertEquals("shared disk content", Files.readString(directory.resolve("second.img")));
+        assertNoStaging(directory);
+    }
+
     /// Missing components remain explicit until additional local files are supplied.
     @Test
     void requiresAllFilesBeforePreparation(@TempDir Path root) throws Exception {
@@ -137,19 +171,34 @@ final class LocalImageImportTest {
         assertNoStaging(directory);
     }
 
+    /// Publishing fails when a different archive occupies the destination.
+    @Test
+    void publicationPreservesExistingDestination(@TempDir Path root) throws Exception {
+        Path source = Files.writeString(root.resolve("staged"), "expected");
+        Path target = Files.writeString(root.resolve("disk.img"), "keep this archive");
+        RuyiDistfile file = file("disk.img", source, true);
+
+        assertThrows(IOException.class, () -> RuyiImageCatalogService.publishLocalImport(source, target, file));
+        assertEquals("keep this archive", Files.readString(target));
+        assertEquals("expected", Files.readString(source));
+    }
+
     /// Import and download both respect the same cache lock.
     @Test
     void sharesLockWithDownloader(@TempDir Path root) throws Exception {
         Path source = Files.writeString(root.resolve("source"), "expected");
         ImageEntry image = image("image", List.of(file("disk.img", source, false)));
-        Path directory = Files.createDirectories(cache(root, image));
-        try (var channel = FileChannel.open(directory.resolveSibling("1.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-             var lock = channel.lock()) {
+        Path directory = cache(root, image);
+        try (@Nullable CacheLock lock = CacheLock.acquire(directory.resolveSibling("1.lock"))) {
+            assertNotNull(lock);
             var service = service(root);
             assertThrows(IOException.class, () -> service.prepareLocalImage(image, List.of(source), false, SILENT));
+            assertFalse(Files.exists(directory));
             assertThrows(IOException.class, () -> service.downloadImage(image, SILENT));
+            assertFalse(Files.exists(directory));
+            assertThrows(IOException.class, () -> service.withDownloadedImage(image, SILENT, path -> path));
+            assertFalse(Files.exists(directory));
         }
-        assertFalse(Files.exists(directory.resolve("disk.img")));
     }
 
     /// Empty files cannot establish an image identity or be imported.
@@ -256,6 +305,25 @@ final class LocalImageImportTest {
     private static void assertNoStaging(Path directory) throws IOException {
         try (var files = Files.list(directory)) {
             assertTrue(files.noneMatch(path -> path.getFileName().toString().startsWith(".import-")));
+        }
+        @Nullable Path name = directory.getParent();
+        @Nullable Path category = name == null ? null : name.getParent();
+        @Nullable Path repo = category == null ? null : category.getParent();
+        @Nullable Path downloads = repo == null ? null : repo.getParent();
+        @Nullable Path cacheRoot = downloads == null ? null : downloads.getParent();
+        if (cacheRoot == null) {
+            return;
+        }
+        Path imports = cacheRoot.resolve("imports")
+                .resolve(repo.getFileName().toString())
+                .resolve(category.getFileName().toString())
+                .resolve(name.getFileName().toString())
+                .resolve(directory.getFileName().toString());
+        if (!Files.isDirectory(imports)) {
+            return;
+        }
+        try (var files = Files.walk(imports)) {
+            assertTrue(files.noneMatch(Files::isRegularFile));
         }
     }
 }

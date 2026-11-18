@@ -43,6 +43,17 @@ import java.util.zip.ZipInputStream;
 /// Materializes downloaded Ruyi distfiles into flashable image artifacts.
 @NotNullByDefault
 public final class RuyiImageMaterializer {
+    /// Prefix for artifacts being prepared for publication.
+    static final String STAGING_PREFIX = ".staging-";
+
+    /// Prefix for artifacts displaced during publication.
+    static final String BACKUP_PREFIX = ".old-";
+
+    /// Returns whether an artifact directory name is reserved for materialization.
+    public static boolean isWorkingArtifactDirectory(String name) {
+        return name.startsWith(STAGING_PREFIX) || name.startsWith(BACKUP_PREFIX);
+    }
+
     /// Logger for image artifact materialization.
     private static final Logger LOGGER = LoggerFactory.getLogger(RuyiImageMaterializer.class);
 
@@ -189,7 +200,7 @@ public final class RuyiImageMaterializer {
                 RuyiDistfile distfile = image.distfiles().get(i);
                 Path source = downloadedDistfiles.get(i);
                 reporter.report(ProgressEvent.indeterminate("materialize", SdkMessages.get("core.materialize.materializing", distfile.name())));
-                materializeDistfile(distfile, source, stagingDirectory, budget);
+                materializeDistfile(distfile, source, stagingDirectory, artifactDirectory, budget);
             }
 
             List<Path> partitions = resolvePartitionPaths(image.partitionMap(), stagingDirectory);
@@ -279,14 +290,17 @@ public final class RuyiImageMaterializer {
     ///
     /// @param distfile          distfile metadata.
     /// @param source            downloaded distfile path.
-    /// @param artifactDirectory output artifact directory.
+    /// @param stagingDirectory  staging artifact directory.
+    /// @param reportedDirectory final artifact directory shown in error messages.
     /// @param budget            materialization safety budget.
     /// @throws IOException when the distfile cannot be materialized.
     private static void materializeDistfile(
             RuyiDistfile distfile,
             Path source,
-            Path artifactDirectory,
+            Path stagingDirectory,
+            Path reportedDirectory,
             MaterializationBudget budget) throws IOException {
+        Path artifactDirectory = stagingDirectory;
         String method = resolveUnpackMethod(distfile);
         LOGGER.atInfo().log(() -> "Materializing distfile. name="
                 + distfile.name()
@@ -321,13 +335,13 @@ public final class RuyiImageMaterializer {
             return;
         }
         if ("deb".equals(method)) {
-            extractDeb(distfile, source, artifactDirectory, budget);
+            extractDeb(distfile, source, artifactDirectory, reportedDirectory, budget);
             return;
         }
         if (method.startsWith("tar.")) {
             @Nullable String compressorName = compressorNameForMethod(method.substring("tar.".length()));
             if (compressorName == null) {
-                throw unsupportedMethod(method, distfile, source, artifactDirectory);
+                throw unsupportedMethod(method, distfile, source, reportedDirectory);
             }
             try (InputStream input = compressedInputStream(source, compressorName)) {
                 extractTar(input, artifactDirectory, distfile, budget);
@@ -345,7 +359,7 @@ public final class RuyiImageMaterializer {
             return;
         }
         if (isExplicitUnpackMethod(distfile.unpack())) {
-            throw unsupportedMethod(method, distfile, source, artifactDirectory);
+            throw unsupportedMethod(method, distfile, source, reportedDirectory);
         }
 
         copyRaw(source, artifactDirectory.resolve(distfile.name()), budget);
@@ -794,6 +808,7 @@ public final class RuyiImageMaterializer {
             RuyiDistfile distfile,
             Path source,
             Path artifactDirectory,
+            Path reportedDirectory,
             MaterializationBudget budget) throws IOException {
         LOGGER.atDebug().log(() -> "Extracting Debian distfile. name=" + distfile.name() + ", source=" + source);
         try (InputStream input = Files.newInputStream(source)) {
@@ -817,6 +832,7 @@ public final class RuyiImageMaterializer {
                             distfile,
                             source,
                             artifactDirectory,
+                            reportedDirectory,
                             member.name(),
                             entryInput,
                             budget);
@@ -844,6 +860,7 @@ public final class RuyiImageMaterializer {
             RuyiDistfile distfile,
             Path source,
             Path artifactDirectory,
+            Path reportedDirectory,
             String memberName,
             InputStream input,
             MaterializationBudget budget) throws IOException {
@@ -861,7 +878,7 @@ public final class RuyiImageMaterializer {
 
         @Nullable String compressorName = compressorNameForMethod(method.substring("tar.".length()));
         if (compressorName == null) {
-            throw unsupportedMethod("deb:" + memberName, distfile, source, artifactDirectory);
+            throw unsupportedMethod("deb:" + memberName, distfile, source, reportedDirectory);
         }
         try (InputStream compressedInput = compressedInputStream(input, compressorName, source + "!" + memberName)) {
             extractTar(compressedInput, artifactDirectory, distfile, budget);
@@ -1058,7 +1075,7 @@ public final class RuyiImageMaterializer {
     /// @throws IOException when the staging directory cannot be created.
     private static Path createStagingDirectory(Path artifactDirectory) throws IOException {
         @Nullable Path parent = artifactDirectory.getParent();
-        String prefix = artifactDirectory.getFileName() + ".tmp-";
+        String prefix = STAGING_PREFIX + artifactDirectory.getFileName() + "-";
         if (parent == null) {
             return Files.createTempDirectory(prefix);
         }
@@ -1112,7 +1129,7 @@ public final class RuyiImageMaterializer {
     /// @throws IOException when the backup path cannot be created.
     private static Path createBackupDirectory(Path artifactDirectory) throws IOException {
         @Nullable Path parent = artifactDirectory.getParent();
-        String prefix = artifactDirectory.getFileName() + ".old-";
+        String prefix = BACKUP_PREFIX + artifactDirectory.getFileName() + "-";
         Path backupDirectory = parent == null
                 ? Files.createTempDirectory(prefix)
                 : Files.createTempDirectory(parent, prefix);

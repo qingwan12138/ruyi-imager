@@ -21,10 +21,16 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.DirectoryNotEmptyException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.text.Normalizer;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -37,6 +43,9 @@ import static org.glavo.ruyi.imager.core.image.DistfileIntegrity.verify;
 /// Downloads and verifies Ruyi distfiles.
 @NotNullByDefault
 public final class RuyiDistfileDownloader {
+    /// Prefix of reserved resume directories used when a sibling archive occupies the legacy partial name.
+    static final String DOWNLOAD_PARTIAL_DIRECTORY_PREFIX = ".download-partials-";
+
     /// Logger for distfile download operations.
     private static final Logger LOGGER = LoggerFactory.getLogger(RuyiDistfileDownloader.class);
 
@@ -93,6 +102,26 @@ public final class RuyiDistfileDownloader {
     /// @return verified target path.
     /// @throws IOException when the distfile cannot be downloaded or verified.
     public Path download(RuyiDistfile distfile, Path targetDirectory, ProgressReporter reporter) throws IOException {
+        return download(distfile, targetDirectory, null, List.of(), reporter);
+    }
+
+    /// Downloads a distfile and records an incomplete-download marker when requested.
+    ///
+    /// The caller holds the version lock when supplying the cache root.
+    ///
+    /// @param distfile distfile declaration.
+    /// @param targetDirectory target directory.
+    /// @param cacheRoot cache root used to store the incomplete-download marker, or null.
+    /// @param archives declarations whose final paths must never be opened as resume files.
+    /// @param reporter progress reporter.
+    /// @return verified target path.
+    /// @throws IOException when the distfile cannot be downloaded or verified.
+    Path download(
+            RuyiDistfile distfile,
+            Path targetDirectory,
+            @Nullable Path cacheRoot,
+            List<RuyiDistfile> archives,
+            ProgressReporter reporter) throws IOException {
         Files.createDirectories(targetDirectory);
         Path target = targetDirectory.resolve(distfile.name());
         LOGGER.atInfo().log(() -> "Downloading distfile. name="
@@ -132,33 +161,132 @@ public final class RuyiDistfileDownloader {
             throw new IOException(SdkMessages.get("core.download.noUrls", distfile.name()));
         }
 
-        Path partial = targetDirectory.resolve(distfile.name() + ".part");
-        IOException failure = null;
-        for (URI sourceUri : sourceUris) {
+        Path partial = partialPath(distfile, targetDirectory, archives);
+        @Nullable Path partialDirectory = partial.getParent();
+        boolean reservedPartial = partialDirectory != null && !partialDirectory.equals(targetDirectory);
+        if (reservedPartial) {
+            Files.createDirectories(partialDirectory);
+        }
+        boolean newPartial = Files.notExists(partial, LinkOption.NOFOLLOW_LINKS);
+        @Nullable Path markerRoot = reservedPartial ? null : cacheRoot;
+        if (markerRoot != null) {
             try {
-                downloadFromUri(distfile, sourceUri, partial, reporter);
-                moveVerifiedPartial(partial, target, distfile);
-                LOGGER.atInfo().log(() -> "Distfile download completed. name=" + distfile.name() + ", target=" + target);
-                return target;
-            } catch (IOException e) {
-                if (Thread.currentThread().isInterrupted()) {
-                    var interruption = new InterruptedIOException(SdkMessages.get("core.download.interrupted", distfile.name()));
-                    interruption.initCause(e);
-                    throw interruption;
-                }
-                LOGGER.warn("Distfile source failed. name="
-                        + distfile.name()
-                        + ", uri="
-                        + LogRedactor.redactUri(sourceUri), e);
-                failure = e;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                LOGGER.warn("Distfile download interrupted. name=" + distfile.name(), e);
-                throw new IOException(SdkMessages.get("core.download.interrupted", distfile.name()), e);
+                ImageCacheMarkers.write(markerRoot, partial);
+            } catch (IOException markerFailure) {
+                LOGGER.warn("Failed to write the download marker. partial=" + partial, markerFailure);
             }
         }
 
-        throw new IOException(SdkMessages.get("core.download.failed", distfile.name()), failure);
+        try {
+            IOException failure = null;
+            for (URI sourceUri : sourceUris) {
+                try {
+                    downloadFromUri(distfile, sourceUri, partial, reporter);
+                    moveVerifiedPartial(partial, target, distfile);
+                    LOGGER.atInfo().log(() -> "Distfile download completed. name=" + distfile.name() + ", target=" + target);
+                    return target;
+                } catch (IOException e) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        var interruption = new InterruptedIOException(SdkMessages.get("core.download.interrupted", distfile.name()));
+                        interruption.initCause(e);
+                        throw interruption;
+                    }
+                    LOGGER.warn("Distfile source failed. name="
+                            + distfile.name()
+                            + ", uri="
+                            + LogRedactor.redactUri(sourceUri), e);
+                    failure = e;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    LOGGER.warn("Distfile download interrupted. name=" + distfile.name(), e);
+                    throw new IOException(SdkMessages.get("core.download.interrupted", distfile.name()), e);
+                }
+            }
+
+            throw new IOException(SdkMessages.get("core.download.failed", distfile.name()), failure);
+        } finally {
+            cleanupPartial(partial, newPartial, markerRoot);
+            if (reservedPartial) {
+                try {
+                    Files.deleteIfExists(partialDirectory);
+                } catch (DirectoryNotEmptyException _) {
+                    // Other resume data can share the same reserved directory.
+                } catch (IOException failure) {
+                    LOGGER.warn("Failed to clean up the download staging directory: " + partialDirectory, failure);
+                }
+            }
+        }
+    }
+
+    /// Selects a resume path that does not occupy another declared archive's final name.
+    ///
+    /// @param distfile distfile declaration.
+    /// @param targetDirectory directory of the image version.
+    /// @param archives declarations for the version.
+    /// @return resume file path.
+    /// @throws IOException when a candidate directory cannot be inspected.
+    static Path partialPath(RuyiDistfile distfile, Path targetDirectory, List<RuyiDistfile> archives) throws IOException {
+        String partialName = distfile.name() + ".part";
+        if (!isDeclaredName(partialName, archives)) {
+            return targetDirectory.resolve(partialName);
+        }
+
+        for (int slot = 0; ; slot++) {
+            String directoryName = DOWNLOAD_PARTIAL_DIRECTORY_PREFIX + slot;
+            if (isDeclaredName(directoryName, archives)) {
+                continue;
+            }
+            Path candidate = targetDirectory.resolve(directoryName);
+            try {
+                BasicFileAttributes attributes =
+                        Files.readAttributes(candidate, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (attributes.isDirectory()
+                        && candidate.toRealPath().equals(targetDirectory.toRealPath().resolve(directoryName))) {
+                    return candidate.resolve(partialName);
+                }
+            } catch (NoSuchFileException _) {
+                return candidate.resolve(partialName);
+            }
+        }
+    }
+
+    /// Checks whether the name might resolve to a declared archive on the actual file system.
+    ///
+    /// P2:258 只比较大小写无法识别 NFC/NFD 等价拼写；按规范化等价规则折叠后，任何可能解析到
+    /// 正式归档名的续传名都会改用隔离目录，避免续传或丢弃分片时处理到完整归档。
+    ///
+    /// @param name candidate filename.
+    /// @param archives declarations for the version.
+    /// @return whether the name matches a declaration.
+    private static boolean isDeclaredName(String name, List<RuyiDistfile> archives) {
+        String folded = foldName(name);
+        return archives.stream().anyMatch(archive -> foldName(archive.name()).equals(folded));
+    }
+
+    /// Folds one file name to the characters that file systems compare as equal.
+    ///
+    /// @param name file name.
+    /// @return decomposed, lower-case form used only for collision checks.
+    private static String foldName(String name) {
+        return Normalizer.normalize(name, Normalizer.Form.NFD).toLowerCase(Locale.ROOT);
+    }
+
+    /// Preserves resumable bytes and discards any empty file first created by this download.
+    ///
+    /// @param partial resume file path.
+    /// @param newPartial whether the resume file was absent before downloading.
+    /// @param cacheRoot cache root with a marker for the resume file, or null.
+    private static void cleanupPartial(Path partial, boolean newPartial, @Nullable Path cacheRoot) {
+        try {
+            if (newPartial && Files.isRegularFile(partial, LinkOption.NOFOLLOW_LINKS) && Files.size(partial) == 0) {
+                Files.deleteIfExists(partial);
+            }
+            if (cacheRoot != null && Files.notExists(partial, LinkOption.NOFOLLOW_LINKS)) {
+                ImageCacheMarkers.delete(cacheRoot, partial);
+            }
+        } catch (IOException failure) {
+            LOGGER.warn("Failed to clean up the download partial or its marker. partial=" + partial, failure);
+        }
     }
 
     /// Downloads one distfile from one source URI.
@@ -210,7 +338,6 @@ public final class RuyiDistfileDownloader {
                         + LogRedactor.redactUri(sourceUri)
                         + ", status="
                         + statusCode);
-                boolean append = existingBytes > 0L && statusCode == 206;
                 if (existingBytes > 0L && statusCode == 416) {
                     if (verify(partial, distfile)) {
                         return;
@@ -245,7 +372,7 @@ public final class RuyiDistfileDownloader {
                         expectedSize,
                         ProgressUnit.BYTES));
 
-                writeResponse(response.body(), partial, distfile, reporter, existingBytes, append);
+                writeResponse(response.body(), partial, distfile, reporter, existingBytes);
                 return;
             }
         }
@@ -260,7 +387,17 @@ public final class RuyiDistfileDownloader {
     /// @return existing bytes that may be resumed.
     /// @throws IOException when the partial file cannot be inspected or deleted.
     private static long preparePartial(RuyiDistfile distfile, Path partial) throws IOException {
-        long existingBytes = Files.isRegularFile(partial) ? Files.size(partial) : 0L;
+        long existingBytes;
+        try {
+            BasicFileAttributes attributes =
+                    Files.readAttributes(partial, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!attributes.isRegularFile()) {
+                throw new IOException("Expected a regular download partial: " + partial);
+            }
+            existingBytes = attributes.size();
+        } catch (NoSuchFileException _) {
+            return 0L;
+        }
         Long expectedSize = distfile.sizeBytes();
         if (expectedSize != null && existingBytes >= expectedSize) {
             if (existingBytes == expectedSize && verify(partial, distfile)) {
@@ -290,7 +427,6 @@ public final class RuyiDistfileDownloader {
     /// @param distfile distfile declaration.
     /// @param reporter progress reporter.
     /// @param initialBytes bytes already present in the partial file.
-    /// @param append whether the response should be appended.
     /// @throws IOException when the response fails, a body wait times out, or the file cannot be written.
     /// @throws InterruptedException when cancellation is requested while writing.
     private void writeResponse(
@@ -298,10 +434,9 @@ public final class RuyiDistfileDownloader {
             Path partial,
             RuyiDistfile distfile,
             ProgressReporter reporter,
-            long initialBytes,
-            boolean append) throws IOException, InterruptedException {
-        StandardOpenOption writeMode = append ? StandardOpenOption.APPEND : StandardOpenOption.TRUNCATE_EXISTING;
-        try (FileChannel output = FileChannel.open(partial, StandardOpenOption.CREATE, StandardOpenOption.WRITE, writeMode)) {
+            long initialBytes) throws IOException, InterruptedException {
+        try (PartialOutput partialOutput = openPartial(partial, initialBytes)) {
+            FileChannel output = partialOutput.channel();
             long currentBytes = initialBytes;
             @Nullable Long expectedSize = distfile.sizeBytes();
             while (true) {
@@ -337,6 +472,211 @@ public final class RuyiDistfileDownloader {
         }
     }
 
+    /// Opens a new partial or resumes through a private name. Shared partials are detached before writing.
+    ///
+    /// P2:503 续传不再把已下载前缀整段复制到同卷临时文件：
+    /// 复用上次异常退出留下的私有续传链接，独占文件则直接原位追加，
+    /// 因此 8 GiB 归档下载到 7 GiB 续传时无需额外的 7 GiB 空间。
+    ///
+    /// @param partial canonical resume filename.
+    /// @param initialBytes number of bytes retained from a previous attempt.
+    /// @return open output positioned after the retained bytes.
+    /// @throws IOException when the partial cannot be opened safely.
+    private static PartialOutput openPartial(Path partial, long initialBytes) throws IOException {
+        Path target = partial.toAbsolutePath();
+        if (initialBytes == 0L) {
+            try {
+                return new PartialOutput(FileChannel.open(target, StandardOpenOption.CREATE_NEW,
+                        StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS), null);
+            } catch (FileAlreadyExistsException _) {
+                // Restart an existing partial through the detached path.
+            }
+        }
+        @Nullable Path parent = target.getParent();
+        if (parent == null) {
+            throw new IOException("Download partial has no parent: " + partial);
+        }
+        if (initialBytes > 0L) {
+            @Nullable Path leftover = findResumeLink(target);
+            if (leftover != null) {
+                return openResumeLink(leftover, initialBytes, partial);
+            }
+            long links = CacheTreeRemoval.linkCount(target);
+            if (links == 1L) {
+                // P2:503 文件没有其他目录项：直接原位追加，既不需要复制前缀，也不会改动其他名称的内容。
+                return openInPlace(target, initialBytes, partial);
+            }
+        }
+        Path directory = Files.createTempDirectory(parent, DOWNLOAD_PARTIAL_DIRECTORY_PREFIX);
+        Path staged = directory.resolve("resume");
+        @Nullable FileChannel output = null;
+        boolean retainWorkingLink = false;
+        try {
+            if (initialBytes > 0L && linkUnsharedPartial(target, staged)) {
+                output = FileChannel.open(staged, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                if (output.size() != initialBytes) {
+                    throw new IOException("Download partial changed before it could be resumed: " + partial);
+                }
+                output.position(initialBytes);
+                retainWorkingLink = true;
+                return new PartialOutput(output, staged);
+            }
+
+            output = FileChannel.open(staged, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE,
+                    LinkOption.NOFOLLOW_LINKS);
+            if (initialBytes > 0L) {
+                try (var input = FileChannel.open(target, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+                    long copied = 0L;
+                    while (copied < initialBytes) {
+                        long count = output.transferFrom(input, copied, initialBytes - copied);
+                        if (count == 0L) {
+                            throw new IOException("Download partial changed before it could be resumed: " + partial);
+                        }
+                        copied += count;
+                    }
+                }
+            }
+            output.position(initialBytes);
+            Files.move(staged, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            PartialOutput result = new PartialOutput(output, null);
+            output = null;
+            return result;
+        } catch (IOException | RuntimeException | Error failure) {
+            if (output != null) {
+                try {
+                    output.close();
+                } catch (IOException closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+            throw failure;
+        } finally {
+            if (!retainWorkingLink) {
+                removeWorkingLink(staged);
+            }
+        }
+    }
+
+    /// Opens an exclusive partial in place so a resume never copies the retained prefix.
+    ///
+    /// @param target existing partial file.
+    /// @param initialBytes bytes retained from the previous attempt.
+    /// @param partial canonical partial path used in diagnostics.
+    /// @return channel positioned after the retained bytes.
+    /// @throws IOException when the file changed or cannot be opened.
+    private static PartialOutput openInPlace(Path target, long initialBytes, Path partial) throws IOException {
+        FileChannel channel = FileChannel.open(target, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        try {
+            if (channel.size() != initialBytes) {
+                throw new IOException("Download partial changed before it could be resumed: " + partial);
+            }
+            channel.position(initialBytes);
+            return new PartialOutput(channel, null);
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                channel.close();
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
+    }
+
+    /// Finds a leftover private resume link that still names the partial file.
+    ///
+    /// @param partial existing partial file.
+    /// @return leftover resume link, or null when there is none.
+    /// @throws IOException when the parent directory cannot be listed.
+    private static @Nullable Path findResumeLink(Path partial) throws IOException {
+        @Nullable Path parent = partial.getParent();
+        if (parent == null) {
+            return null;
+        }
+        try (var directories = Files.newDirectoryStream(parent, DOWNLOAD_PARTIAL_DIRECTORY_PREFIX + "*")) {
+            for (Path directory : directories) {
+                if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+                    continue;
+                }
+                Path candidate = directory.resolve("resume");
+                if (Files.isRegularFile(candidate, LinkOption.NOFOLLOW_LINKS)
+                        && Files.isSameFile(candidate, partial)
+                        && CacheTreeRemoval.hasExactlyTwoLinks(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Reopens a private resume link left by an interrupted download.
+    ///
+    /// @param link leftover private resume link.
+    /// @param initialBytes bytes retained from the previous attempt.
+    /// @param partial canonical partial path used in diagnostics.
+    /// @return channel positioned after the retained bytes.
+    /// @throws IOException when the file changed or cannot be opened.
+    private static PartialOutput openResumeLink(Path link, long initialBytes, Path partial) throws IOException {
+        FileChannel channel = FileChannel.open(link, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        try {
+            if (channel.size() != initialBytes) {
+                throw new IOException("Download partial changed before it could be resumed: " + partial);
+            }
+            channel.position(initialBytes);
+            return new PartialOutput(channel, link);
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                channel.close();
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
+    }
+
+    /// Creates a private name for an unshared partial if the file system can verify its link count.
+    private static boolean linkUnsharedPartial(Path partial, Path staged) throws IOException {
+        try {
+            if (Files.isRegularFile(partial, LinkOption.NOFOLLOW_LINKS)) {
+                Files.createLink(staged, partial);
+                if (Files.isRegularFile(staged, LinkOption.NOFOLLOW_LINKS)
+                        && Files.isRegularFile(partial, LinkOption.NOFOLLOW_LINKS)
+                        && Files.isSameFile(staged, partial) && CacheTreeRemoval.hasExactlyTwoLinks(staged)) {
+                    return true;
+                }
+            }
+        } catch (IOException | UnsupportedOperationException _) {
+            // Use an exclusive copy when a private link or its identity cannot be verified.
+        }
+        Files.deleteIfExists(staged);
+        return false;
+    }
+
+    /// Removes the private resume name and its working directory.
+    private static void removeWorkingLink(Path staged) {
+        Path directory = staged.getParent();
+        try {
+            Files.deleteIfExists(staged);
+            Files.deleteIfExists(directory);
+        } catch (IOException failure) {
+            LOGGER.warn("Failed to remove download working directory: " + directory, failure);
+        }
+    }
+
+    /// Holds the partial channel and any private name retained until it closes.
+    private record PartialOutput(FileChannel channel, @Nullable Path workingLink) implements AutoCloseable {
+        /// Closes the channel before removing a retained private name.
+        @Override
+        public void close() throws IOException {
+            try {
+                channel.close();
+            } finally {
+                if (workingLink != null) {
+                    removeWorkingLink(workingLink);
+                }
+            }
+        }
+    }
+
     /// Moves a verified partial download into its final path.
     ///
     /// @param partial partial path.
@@ -344,7 +684,7 @@ public final class RuyiDistfileDownloader {
     /// @param distfile distfile declaration.
     /// @throws IOException when verification or move fails.
     private static void moveVerifiedPartial(Path partial, Path target, RuyiDistfile distfile) throws IOException {
-        if (!verify(partial, distfile)) {
+        if (!Files.isRegularFile(partial, LinkOption.NOFOLLOW_LINKS) || !verify(partial, distfile)) {
             LOGGER.atWarn().log(() -> "Downloaded distfile verification failed. name="
                     + distfile.name()
                     + ", partial="
