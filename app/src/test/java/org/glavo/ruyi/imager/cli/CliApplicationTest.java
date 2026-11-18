@@ -63,6 +63,7 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -783,6 +784,190 @@ public final class CliApplicationTest {
         assertEquals("error", root.path("type").asText());
         assertEquals("Unsupported provision strategy: vendor-custom-v1", root.path("message").asText());
         assertArrayEquals(new byte[128], Files.readAllBytes(target));
+    }
+
+    /// Reports cached image versions and incomplete downloads through the CLI.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws Exception when fixture files cannot be written or JSON cannot be parsed.
+    @Test
+    public void cacheListReportsEntriesAndPartialFiles(@TempDir Path directory) throws Exception {
+        Path cache = directory.resolve("cache");
+        writeCacheFile(cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/root.zst"), 100);
+        writeCacheFile(cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/boot.zst.part"), 10);
+        writeCacheFile(cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/boot.zst.part.ruyi-partial"), 0);
+        writeCacheFile(cache.resolve("artifacts/ruyisdk/board-image/meles/1.0.0/root.ext4"), 200);
+        writeCacheFile(cache.resolve("repos/ruyisdk/metadata"), 7);
+
+        CliResult result = runCli(services(directory, List.of()), "image", "cache", "list", "--json");
+
+        assertEquals(0, result.exitCode(), result.stderr());
+        JsonNode root = MAPPER.readTree(result.stdout());
+        assertEquals("cache-list", root.path("type").asText());
+        assertEquals(100L, root.path("downloadBytes").asLong());
+        assertEquals(200L, root.path("artifactBytes").asLong());
+        assertEquals(10L, root.path("partialBytes").asLong());
+        assertEquals(1, root.path("partialFiles").asInt());
+        assertEquals(7L, root.path("repositoryBytes").asLong());
+        assertTrue(root.has("logBytes"));
+        assertEquals(0, root.path("unreadable").size());
+        assertEquals(1, root.path("entries").size());
+        assertEquals("board-image/meles(1.0.0)", root.path("entries").get(0).path("atom").asText());
+    }
+
+    /// Refuses to remove cached images without an explicit confirmation.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void cacheCleanRequiresConfirmation(@TempDir Path directory) throws Exception {
+        Path cache = directory.resolve("cache");
+        Path cached = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/root.zst");
+        writeCacheFile(cached, 100);
+
+        CliResult result = runCli(services(directory, List.of()), "image", "cache", "clean", "board-image/meles(1.0.0)");
+
+        assertEquals(2, result.exitCode());
+        assertTrue(result.stdout().contains("--yes"), result.stdout());
+        assertTrue(Files.exists(cached));
+    }
+
+    /// Removes one selected cached image and keeps the other versions.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void cacheCleanRemovesSelectedImage(@TempDir Path directory) throws Exception {
+        Path cache = directory.resolve("cache");
+        Path selectedDownloads = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/root.zst");
+        Path selectedArtifacts = cache.resolve("artifacts/ruyisdk/board-image/meles/1.0.0/root.ext4");
+        Path keptDownloads = cache.resolve("downloads/ruyisdk/board-image/meles/2.0.0/root.zst");
+        writeCacheFile(selectedDownloads, 100);
+        writeCacheFile(selectedArtifacts, 200);
+        writeCacheFile(keptDownloads, 50);
+
+        CliResult result = runCli(
+                services(directory, List.of()),
+                "image",
+                "cache",
+                "clean",
+                "board-image/meles(1.0.0)",
+                "--yes");
+
+        assertEquals(0, result.exitCode(), result.stderr());
+        assertFalse(Files.exists(selectedDownloads));
+        assertFalse(Files.exists(selectedArtifacts));
+        assertTrue(Files.exists(keptDownloads));
+    }
+
+    /// Removes only incomplete downloads and leftover files.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void cacheCleanPartialsKeepsCompleteImages(@TempDir Path directory) throws Exception {
+        Path cache = directory.resolve("cache");
+        Path part = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/boot.zst.part");
+        Path partMarker = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/boot.zst.part.ruyi-partial");
+        Path complete = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/root.zst");
+        Path leftover = cache.resolve("artifacts/ruyisdk/board-image/meles/.staging-1.0.0-123/file");
+        writeCacheFile(part, 10);
+        writeCacheFile(partMarker, 0);
+        writeCacheFile(complete, 100);
+        writeCacheFile(leftover, 5);
+
+        CliResult result = runCli(services(directory, List.of()), "image", "cache", "clean", "--partials", "--yes");
+
+        assertEquals(0, result.exitCode(), result.stderr());
+        assertFalse(Files.exists(part));
+        assertFalse(Files.exists(leftover.getParent()));
+        assertTrue(Files.exists(complete));
+    }
+
+    /// Emits a parseable JSON preview when the removal is not confirmed yet.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws Exception when fixture files cannot be written or JSON cannot be parsed.
+    @Test
+    public void cacheCleanJsonPreviewIsParseable(@TempDir Path directory) throws Exception {
+        Path cache = directory.resolve("cache");
+        Path cached = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/root.zst");
+        writeCacheFile(cached, 100);
+
+        CliResult result = runCli(
+                services(directory, List.of()),
+                "image",
+                "cache",
+                "clean",
+                "board-image/meles(1.0.0)",
+                "--json");
+
+        assertEquals(2, result.exitCode());
+        assertTrue(result.stdout().startsWith("{"), result.stdout());
+        JsonNode root = MAPPER.readTree(result.stdout());
+        assertEquals("cache-clean-preview", root.path("type").asText());
+        assertEquals(100L, root.path("removedBytes").asLong());
+        assertTrue(root.path("requiresConfirmation").asBoolean());
+        assertTrue(Files.exists(cached));
+    }
+
+    /// Removes matching cached versions from every repository.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void cacheCleanRemovesEveryRepositoryCopy(@TempDir Path directory) throws Exception {
+        Path cache = directory.resolve("cache");
+        Path first = cache.resolve("downloads/repo-a/board-image/meles/1.0.0/root.zst");
+        Path second = cache.resolve("downloads/repo-b/board-image/meles/1.0.0/root.zst");
+        writeCacheFile(first, 10);
+        writeCacheFile(second, 20);
+
+        CliResult result = runCli(
+                services(directory, List.of()),
+                "image",
+                "cache",
+                "clean",
+                "board-image/meles(1.0.0)",
+                "--yes");
+
+        assertEquals(0, result.exitCode(), result.stderr());
+        assertFalse(Files.exists(first));
+        assertFalse(Files.exists(second));
+    }
+
+    /// Rejects a request that asks for both the whole cache and leftovers only.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void cacheCleanRejectsConflictingScopes(@TempDir Path directory) throws Exception {
+        Path cache = directory.resolve("cache");
+        Path cached = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/root.zst");
+        writeCacheFile(cached, 100);
+
+        CliResult result = runCli(
+                services(directory, List.of()),
+                "image",
+                "cache",
+                "clean",
+                "--all",
+                "--partials",
+                "--yes");
+
+        assertEquals(2, result.exitCode());
+        assertTrue(result.stderr().contains("--partials"), result.stderr());
+        assertTrue(Files.exists(cached));
+    }
+
+    /// Writes a cache fixture file of the requested size.
+    ///
+    /// @param file file to write.
+    /// @param size file size in bytes.
+    /// @throws IOException when the file cannot be written.
+    private static void writeCacheFile(Path file, int size) throws IOException {
+        Files.createDirectories(file.getParent());
+        Files.write(file, new byte[size]);
     }
 
     /// Creates shared test services.

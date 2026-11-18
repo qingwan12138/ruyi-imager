@@ -4,6 +4,7 @@
 package org.glavo.ruyi.imager.core.flash;
 
 import org.glavo.ruyi.imager.core.OperationResult;
+import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.ProgressEvent;
 import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
@@ -23,6 +24,13 @@ import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -56,6 +64,9 @@ public final class LocalFlashService implements FlashService {
 
     /// dd-style raw image writer backend.
     private final DdImageWriter ddImageWriter;
+
+    /// Application directories used to lease cached artifacts, or null when the cache is unknown.
+    private final @Nullable AppDirectories directories;
 
     /// Creates the local flash service.
     ///
@@ -137,11 +148,46 @@ public final class LocalFlashService implements FlashService {
             FastbootService fastboot,
             BlockDevicePreparer blockDevicePreparer,
             DdImageWriter ddImageWriter) {
+        this(images, devices, fastboot, blockDevicePreparer, ddImageWriter, null);
+    }
+
+    /// Creates the local flash service with cache-aware artifact leases.
+    ///
+    /// @param images image catalog service.
+    /// @param devices block-device service used to re-resolve targets.
+    /// @param fastboot fastboot backend.
+    /// @param blockDevicePreparer block-device preparation hook.
+    /// @param directories application directories used to lease cached artifacts.
+    public LocalFlashService(
+            ImageCatalogService images,
+            @Nullable BlockDeviceService devices,
+            FastbootService fastboot,
+            BlockDevicePreparer blockDevicePreparer,
+            AppDirectories directories) {
+        this(images, devices, fastboot, blockDevicePreparer, DdImageWriter.process(), directories);
+    }
+
+    /// Creates the local flash service.
+    ///
+    /// @param images image catalog service.
+    /// @param devices block-device service used to re-resolve targets.
+    /// @param fastboot fastboot backend.
+    /// @param blockDevicePreparer block-device preparation hook.
+    /// @param ddImageWriter dd-style raw image writer backend.
+    /// @param directories application directories used to lease cached artifacts, or null.
+    private LocalFlashService(
+            ImageCatalogService images,
+            @Nullable BlockDeviceService devices,
+            FastbootService fastboot,
+            BlockDevicePreparer blockDevicePreparer,
+            DdImageWriter ddImageWriter,
+            @Nullable AppDirectories directories) {
         this.images = images;
         this.devices = devices;
         this.fastboot = fastboot;
         this.blockDevicePreparer = blockDevicePreparer;
         this.ddImageWriter = ddImageWriter;
+        this.directories = directories;
     }
 
     /// Executes an image flash request.
@@ -160,7 +206,12 @@ public final class LocalFlashService implements FlashService {
                 + request.verify());
         @Nullable Path localImage = request.localImage();
         if (localImage != null) {
-            return flashBlockImage(localImage, request.target(), request.verify(), reporter);
+            try (@Nullable CacheLease lease = acquireCacheLease(localImage)) {
+                return flashBlockImage(localImage, request.target(), request.verify(), reporter);
+            } catch (CacheBusyException _) {
+                LOGGER.warn("Cached image is being cleaned. source=" + localImage);
+                return OperationResult.failure(SdkMessages.get("core.flash.cacheBusy"));
+            }
         }
 
         @Nullable ImageEntry image = request.image();
@@ -178,11 +229,16 @@ public final class LocalFlashService implements FlashService {
         if (ProvisionStrategies.isDD(image.strategy())) {
             LOGGER.atInfo().log(() -> "Dispatching dd-v1 flash. atom=" + image.atom());
             Path materialized = images.downloadImage(image, reporter);
-            @Unmodifiable Map<String, Path> partitions = resolvePartitionPaths(image, materialized);
-            if (partitions.size() == 1 && request.target().blockDevice() != null) {
-                return flashBlockImage(partitions.values().iterator().next(), request.target(), request.verify(), reporter);
+            try (@Nullable CacheLease lease = acquireCacheLease(materialized)) {
+                @Unmodifiable Map<String, Path> partitions = resolvePartitionPaths(image, materialized);
+                if (partitions.size() == 1 && request.target().blockDevice() != null) {
+                    return flashBlockImage(partitions.values().iterator().next(), request.target(), request.verify(), reporter);
+                }
+                return flashBlockPartitions(partitions, request.target(), request.verify(), reporter);
+            } catch (CacheBusyException _) {
+                LOGGER.warn("Cached image is being cleaned. atom=" + image.atom());
+                return OperationResult.failure(SdkMessages.get("core.flash.cacheBusy"));
             }
-            return flashBlockPartitions(partitions, request.target(), request.verify(), reporter);
         }
 
         if (ProvisionStrategies.isFastboot(image.strategy())) {
@@ -630,6 +686,27 @@ public final class LocalFlashService implements FlashService {
         }
 
         Path materialized = images.downloadImage(image, reporter);
+        try (@Nullable CacheLease lease = acquireCacheLease(materialized)) {
+            return flashFastbootArtifacts(image, materialized, fastbootDevice, reporter);
+        } catch (CacheBusyException _) {
+            LOGGER.warn("Cached image is being cleaned. atom=" + image.atom());
+            return OperationResult.failure(SdkMessages.get("core.flash.cacheBusy"));
+        }
+    }
+
+    /// Flashes complete fastboot artifacts while the caller holds the cache lease.
+    ///
+    /// @param image image metadata.
+    /// @param materialized materialized artifact directory.
+    /// @param fastbootDevice connected fastboot device.
+    /// @param reporter progress reporter.
+    /// @return operation result.
+    /// @throws IOException when fastboot execution fails.
+    private OperationResult flashFastbootArtifacts(
+            ImageEntry image,
+            Path materialized,
+            FastbootDevice fastbootDevice,
+            ProgressReporter reporter) throws IOException {
         @Unmodifiable List<ImageComponent> components = image.components();
         if (components.size() <= 1) {
             @Unmodifiable Map<String, Path> partitions = resolvePartitionPaths(image, materialized);
@@ -667,6 +744,93 @@ public final class LocalFlashService implements FlashService {
             fastbootDevice = result.device();
         }
         return OperationResult.success(SdkMessages.get("core.fastboot.success"));
+    }
+
+    /// Acquires the cache lock that owns a materialized artifact.
+    ///
+    /// @param materialized materialized image file or directory.
+    /// @return held lease, or null when the artifact is not inside the application cache.
+    /// @throws IOException when the lock file cannot be opened.
+    /// @throws CacheBusyException when another process holds the cache lock.
+    private @Nullable CacheLease acquireCacheLease(Path materialized) throws IOException, CacheBusyException {
+        @Nullable Path versionDirectory = cacheVersionDirectory(materialized);
+        @Nullable Path parent = versionDirectory == null ? null : versionDirectory.getParent();
+        if (versionDirectory == null || parent == null) {
+            return null;
+        }
+        Path lockPath = parent.resolve(versionDirectory.getFileName() + ".lock");
+        FileChannel channel = FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        try {
+            @Nullable FileLock lock = channel.tryLock();
+            if (lock == null) {
+                channel.close();
+                throw new CacheBusyException();
+            }
+            return new CacheLease(channel, lock);
+        } catch (OverlappingFileLockException _) {
+            channel.close();
+            throw new CacheBusyException();
+        }
+    }
+
+    /// Returns the cache version directory that owns a materialized artifact.
+    ///
+    /// @param materialized materialized image file or directory.
+    /// @return version directory, or null when the artifact is not a cached image version.
+    private @Nullable Path cacheVersionDirectory(Path materialized) {
+        @Nullable AppDirectories appDirectories = directories;
+        if (appDirectories == null) {
+            return null;
+        }
+        Path root = appDirectories.cacheDirectory().resolve("artifacts").toAbsolutePath().normalize();
+        Path path = materialized.toAbsolutePath().normalize();
+        if (!path.startsWith(root)) {
+            return null;
+        }
+        @Nullable Path versionDirectory =
+                Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) ? path : path.getParent();
+        if (versionDirectory == null) {
+            return null;
+        }
+        return root.relativize(versionDirectory).getNameCount() == 4 ? versionDirectory : null;
+    }
+
+    /// Cache lock held while a cached artifact is being flashed.
+    @NotNullByDefault
+    private static final class CacheLease implements AutoCloseable {
+        /// Open lock file channel.
+        private final FileChannel channel;
+
+        /// Held file lock.
+        private final FileLock lock;
+
+        /// Creates a lease from an open channel and its lock.
+        ///
+        /// @param channel open lock file channel.
+        /// @param lock held file lock.
+        private CacheLease(FileChannel channel, FileLock lock) {
+            this.channel = channel;
+            this.lock = lock;
+        }
+
+        /// Releases the lock and closes the lock file.
+        ///
+        /// @throws IOException when the lock file cannot be closed.
+        @Override
+        public void close() throws IOException {
+            try {
+                lock.release();
+            } finally {
+                channel.close();
+            }
+        }
+    }
+
+    /// Signals that a cached artifact is locked by a cleanup operation.
+    @NotNullByDefault
+    private static final class CacheBusyException extends Exception {
+        /// Serialization identifier.
+        private static final long serialVersionUID = 1L;
     }
 
     /// Holds one component's resolved partition paths for ordered execution after preflight.

@@ -133,11 +133,14 @@ public final class RuyiDistfileDownloader {
         }
 
         Path partial = targetDirectory.resolve(distfile.name() + ".part");
+        Path partialMarker = partial.resolveSibling(partial.getFileName() + ".ruyi-partial");
+        Files.writeString(partialMarker, distfile.name());
         IOException failure = null;
         for (URI sourceUri : sourceUris) {
             try {
                 downloadFromUri(distfile, sourceUri, partial, reporter);
                 moveVerifiedPartial(partial, target, distfile);
+                Files.deleteIfExists(partialMarker);
                 LOGGER.atInfo().log(() -> "Distfile download completed. name=" + distfile.name() + ", target=" + target);
                 return target;
             } catch (IOException e) {

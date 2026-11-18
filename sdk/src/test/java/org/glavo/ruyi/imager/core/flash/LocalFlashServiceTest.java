@@ -5,13 +5,16 @@ package org.glavo.ruyi.imager.core.flash;
 
 import org.glavo.ruyi.imager.core.OperationResult;
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.ProgressReporter;
+import org.glavo.ruyi.imager.core.SdkMessages;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
 import org.glavo.ruyi.imager.core.device.BlockDeviceService;
 import org.glavo.ruyi.imager.core.fastboot.FastbootDevice;
 import org.glavo.ruyi.imager.core.fastboot.FastbootFlashResult;
 import org.glavo.ruyi.imager.core.fastboot.FastbootService;
+import org.glavo.ruyi.imager.core.fastboot.ProcessFastbootService;
 import org.glavo.ruyi.imager.core.image.ImageCatalog;
 import org.glavo.ruyi.imager.core.image.ImageCatalogService;
 import org.glavo.ruyi.imager.core.image.ImageComponent;
@@ -28,6 +31,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -1511,6 +1515,40 @@ public final class LocalFlashServiceTest {
         @Override
         public Path downloadImage(ImageEntry image, ProgressReporter reporter) throws IOException {
             throw new IOException("No images are available.");
+        }
+    }
+
+    /// Refuses to flash a cached artifact while a cleanup holds its cache lock.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void refusesFlashWhileCacheIsCleaned(@TempDir Path temporaryDirectory) throws Exception {
+        Path cache = temporaryDirectory.resolve("cache");
+        Path image = cache.resolve("artifacts/ruyisdk/board-image/meles/1.0.0/root.raw");
+        Files.createDirectories(image.getParent());
+        Files.write(image, new byte[]{1});
+        Path targetPath = temporaryDirectory.resolve("target.raw");
+        Files.write(targetPath, new byte[8]);
+        LocalFlashService service = new LocalFlashService(
+                new EmptyImageCatalogService(),
+                null,
+                new ProcessFastbootService(),
+                BlockDevicePreparer.none(),
+                new AppDirectories(temporaryDirectory.resolve("config"), cache));
+        Path lockPath = cache.resolve("artifacts/ruyisdk/board-image/meles/1.0.0.lock");
+
+        try (FileChannel channel = FileChannel.open(
+                lockPath,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE);
+             @Nullable FileLock lock = channel.lock()) {
+            OperationResult result = service.flash(
+                    new FlashRequest(null, image, target(targetPath, 8, false, false), false),
+                    NO_PROGRESS);
+
+            assertFalse(result.success());
+            assertEquals(SdkMessages.get("core.flash.cacheBusy"), result.message());
         }
     }
 

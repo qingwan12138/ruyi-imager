@@ -14,6 +14,10 @@ import org.glavo.ruyi.imager.core.fastboot.FastbootDevice;
 import org.glavo.ruyi.imager.core.flash.FlashRequest;
 import org.glavo.ruyi.imager.core.flash.FlashTarget;
 import org.glavo.ruyi.imager.core.image.ImageCatalog;
+import org.glavo.ruyi.imager.core.image.ImageCacheCleanResult;
+import org.glavo.ruyi.imager.core.image.ImageCacheEntry;
+import org.glavo.ruyi.imager.core.image.ImageCacheService;
+import org.glavo.ruyi.imager.core.image.ImageCacheUsage;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
 import org.glavo.ruyi.imager.i18n.Messages;
 import org.glavo.ruyi.imager.logging.LogRedactor;
@@ -50,6 +54,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.List;
 import java.util.Map;
@@ -220,6 +225,18 @@ public final class CliApplication implements Callable<Integer> {
         CommandLine commandLine = new CommandLine(new ImageCommand());
         commandLine.addSubcommand("list", new ImageListCommand(services));
         commandLine.addSubcommand("download", new ImageDownloadCommand(services));
+        commandLine.addSubcommand("cache", cacheCommand(services));
+        return commandLine;
+    }
+
+    /// Builds the cache command group.
+    ///
+    /// @param services shared application services.
+    /// @return configured command line.
+    private static CommandLine cacheCommand(AppServices services) {
+        CommandLine commandLine = new CommandLine(new ImageCacheCommand());
+        commandLine.addSubcommand("list", new ImageCacheListCommand(services));
+        commandLine.addSubcommand("clean", new ImageCacheCleanCommand(services));
         return commandLine;
     }
 
@@ -449,6 +466,10 @@ public final class CliApplication implements Callable<Integer> {
         setDescription(image, "cli.image.description");
         setDescription(image.getSubcommands().get("list"), "cli.image.list.description");
         setDescription(image.getSubcommands().get("download"), "cli.image.download.description");
+        CommandLine cache = image.getSubcommands().get("cache");
+        setDescription(cache, "cli.image.cache.description");
+        setDescription(cache.getSubcommands().get("list"), "cli.image.cache.list.description");
+        setDescription(cache.getSubcommands().get("clean"), "cli.image.cache.clean.description");
         CommandLine device = commandLine.getSubcommands().get("device");
         setDescription(device, "cli.device.description");
         setDescription(device.getSubcommands().get("list"), "cli.device.list.description");
@@ -720,6 +741,285 @@ public final class CliApplication implements Callable<Integer> {
                 return failException(e, json);
             }
         }
+    }
+
+    /// Command group for download cache operations.
+    @Command(name = "cache", description = "Inspect and clean the image download cache.")
+    @NotNullByDefault
+    private static final class ImageCacheCommand implements Callable<Integer> {
+        /// Picocli command specification injected at runtime.
+        @Spec
+        private @Nullable CommandSpec spec;
+
+        /// Prints cache command usage to standard error.
+        ///
+        /// @return the usage-error exit code.
+        @Override
+        public Integer call() {
+            return printMissingSubcommandUsage(spec);
+        }
+    }
+
+    /// Lists cached image versions and their sizes.
+    @Command(name = "list", description = "List cached images and their sizes.")
+    @NotNullByDefault
+    private static final class ImageCacheListCommand implements Callable<Integer> {
+        /// Services used by the command.
+        private final AppServices services;
+
+        /// Whether command output should be JSON.
+        @Option(
+                names = "--json",
+                description = "Emit a JSON object.",
+                descriptionKey = "cli.option.json.object")
+        private boolean json;
+
+        /// Creates the cache list command.
+        ///
+        /// @param services shared application services.
+        private ImageCacheListCommand(AppServices services) {
+            this.services = services;
+        }
+
+        /// Lists cached images.
+        ///
+        /// @return process exit code.
+        @Override
+        public Integer call() {
+            try {
+                ImageCacheUsage usage = new ImageCacheService(services.directories()).usage();
+                if (json) {
+                    Map<String, Object> output = cacheUsageMap(usage);
+                    output.put("type", "cache-list");
+                    JsonOutput.print(output);
+                    return CommandLine.ExitCode.OK;
+                }
+                if (usage.entries().isEmpty() && usage.partialFiles() == 0) {
+                    System.out.println(usage.unreadable().isEmpty()
+                            ? Messages.get("cli.cache.none")
+                            : Messages.get("cli.cache.unreadable", usage.unreadable().size()));
+                    return CommandLine.ExitCode.OK;
+                }
+                System.out.println(Messages.get(
+                        "cli.cache.summary",
+                        CliProgressPrinter.sizeLabel(usage.totalBytes()),
+                        CliProgressPrinter.sizeLabel(usage.downloadBytes()),
+                        CliProgressPrinter.sizeLabel(usage.artifactBytes()),
+                        CliProgressPrinter.sizeLabel(usage.partialBytes()),
+                        CliProgressPrinter.sizeLabel(usage.logBytes())));
+                for (ImageCacheEntry entry : usage.entries()) {
+                    System.out.println(Messages.get(
+                            "cli.cache.entry",
+                            entry.atom(),
+                            CliProgressPrinter.sizeLabel(entry.totalBytes()),
+                            Messages.get(entry.partial() ? "cli.cache.state.partial" : "cli.cache.state.cached")));
+                }
+                if (!usage.unreadable().isEmpty()) {
+                    System.out.println(Messages.get("cli.cache.unreadable", usage.unreadable().size()));
+                }
+                return CommandLine.ExitCode.OK;
+            } catch (RuntimeException e) {
+                return failException(e, json);
+            }
+        }
+    }
+
+    /// Removes cached images or leftover files.
+    @Command(name = "clean", description = "Remove cached images or leftover files.")
+    @NotNullByDefault
+    private static final class ImageCacheCleanCommand implements Callable<Integer> {
+        /// Services used by the command.
+        private final AppServices services;
+
+        /// Image atoms to remove.
+        @Parameters(
+                index = "0..*",
+                paramLabel = "ATOM",
+                description = "Image atoms to remove.",
+                descriptionKey = "cli.option.atom")
+        private @Nullable List<String> atoms;
+
+        /// Whether every cached image should be removed.
+        @Option(
+                names = "--all",
+                description = "Remove every cached image.",
+                descriptionKey = "cli.option.cacheAll")
+        private boolean all;
+
+        /// Whether incomplete downloads and leftover files should be removed.
+        @Option(
+                names = "--partials",
+                description = "Remove incomplete downloads and leftover files.",
+                descriptionKey = "cli.option.cachePartials")
+        private boolean partials;
+
+        /// Whether the removal was explicitly confirmed.
+        @Option(
+                names = "--yes",
+                description = "Confirm destructive removal.",
+                descriptionKey = "cli.option.yes")
+        private boolean yes;
+
+        /// Whether command output should be JSON.
+        @Option(
+                names = "--json",
+                description = "Emit a JSON object.",
+                descriptionKey = "cli.option.json.object")
+        private boolean json;
+
+        /// Creates the cache clean command.
+        ///
+        /// @param services shared application services.
+        private ImageCacheCleanCommand(AppServices services) {
+            this.services = services;
+        }
+
+        /// Removes cached images.
+        ///
+        /// @return process exit code.
+        @Override
+        public Integer call() {
+            List<String> requested = atoms == null ? List.of() : List.copyOf(atoms);
+            if (all && partials) {
+                fail(Messages.get("cli.cache.clean.conflictingScopes"), json);
+                return CommandLine.ExitCode.USAGE;
+            }
+            if (!all && !partials && requested.isEmpty()) {
+                fail(Messages.get("cli.cache.clean.requiresTarget"), json);
+                return CommandLine.ExitCode.USAGE;
+            }
+            try {
+                ImageCacheService service = new ImageCacheService(services.directories());
+                ImageCacheUsage usage = service.usage();
+                LinkedHashSet<ImageCacheEntry> selected = new LinkedHashSet<>();
+                for (String atom : requested) {
+                    List<ImageCacheEntry> matches = findEntries(usage, atom);
+                    if (matches.isEmpty()) {
+                        fail(Messages.get("cli.cache.unknownAtom", atom), json);
+                        return CommandLine.ExitCode.USAGE;
+                    }
+                    selected.addAll(matches);
+                }
+                long plannedBytes = all
+                        ? usage.totalBytes()
+                        : selected.stream().mapToLong(ImageCacheEntry::totalBytes).sum();
+                if (partials && !all) {
+                    plannedBytes += Math.max(0L, usage.partialBytes()
+                            - selected.stream().mapToLong(ImageCacheEntry::partialBytes).sum());
+                }
+                if (!yes) {
+                    if (json) {
+                        Map<String, Object> output = new LinkedHashMap<>();
+                        output.put("type", "cache-clean-preview");
+                        output.put("removedBytes", plannedBytes);
+                        output.put("requiresConfirmation", true);
+                        JsonOutput.print(output);
+                    } else {
+                        System.out.println(Messages.get(
+                                "cli.cache.clean.confirm",
+                                CliProgressPrinter.sizeLabel(plannedBytes)));
+                    }
+                    return CommandLine.ExitCode.USAGE;
+                }
+
+                ImageCacheCleanResult result = ImageCacheCleanResult.empty();
+                if (all) {
+                    result = mergeCleanResults(result, service.cleanAll());
+                } else {
+                    if (!selected.isEmpty()) {
+                        result = mergeCleanResults(result, service.cleanEntries(List.copyOf(selected)));
+                    }
+                    if (partials) {
+                        result = mergeCleanResults(result, service.cleanPartials());
+                    }
+                }
+                if (json) {
+                    Map<String, Object> output = new LinkedHashMap<>();
+                    output.put("type", "cache-clean");
+                    output.put("removedBytes", result.removedBytes());
+                    output.put("removedFiles", result.removedFiles());
+                    output.put("skipped", result.skipped());
+                    JsonOutput.print(output);
+                    return CommandLine.ExitCode.OK;
+                }
+                System.out.println(Messages.get(
+                        "cli.cache.clean.done",
+                        CliProgressPrinter.sizeLabel(result.removedBytes()),
+                        result.removedFiles()));
+                if (!result.skipped().isEmpty()) {
+                    System.out.println(Messages.get("cli.cache.clean.skipped", result.skipped().size()));
+                }
+                return CommandLine.ExitCode.OK;
+            } catch (RuntimeException e) {
+                return failException(e, json);
+            }
+        }
+    }
+
+    /// Finds every cached image entry matching an atom.
+    ///
+    /// The same image may be cached under more than one repository, so every match is returned.
+    ///
+    /// @param usage cache usage to search.
+    /// @param atom image atom or image name.
+    /// @return matching entries, possibly empty.
+    private static @Unmodifiable List<ImageCacheEntry> findEntries(ImageCacheUsage usage, String atom) {
+        ArrayList<ImageCacheEntry> matches = new ArrayList<>();
+        for (ImageCacheEntry entry : usage.entries()) {
+            if (entry.atom().equals(atom) || entry.name().equals(atom)) {
+                matches.add(entry);
+            }
+        }
+        return List.copyOf(matches);
+    }
+
+    /// Builds the JSON view of cache usage.
+    ///
+    /// @param usage cache usage.
+    /// @return JSON-ready map.
+    private static Map<String, Object> cacheUsageMap(ImageCacheUsage usage) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("downloadBytes", usage.downloadBytes());
+        output.put("artifactBytes", usage.artifactBytes());
+        output.put("partialBytes", usage.partialBytes());
+        output.put("partialFiles", usage.partialFiles());
+        output.put("repositoryBytes", usage.repositoryBytes());
+        output.put("logBytes", usage.logBytes());
+        output.put("unreadable", usage.unreadable());
+        ArrayList<Map<String, Object>> entries = new ArrayList<>();
+        for (ImageCacheEntry entry : usage.entries()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("atom", entry.atom());
+            item.put("repoId", entry.repoId());
+            item.put("category", entry.category());
+            item.put("name", entry.name());
+            item.put("version", entry.version());
+            item.put("artifactBytes", entry.artifactBytes());
+            item.put("downloadBytes", entry.downloadBytes());
+            item.put("partialBytes", entry.partialBytes());
+            item.put("partialFiles", entry.partialFiles());
+            item.put("lastModifiedMillis", entry.lastModifiedMillis());
+            entries.add(item);
+        }
+        output.put("entries", entries);
+        return output;
+    }
+
+    /// Merges two cache clean results.
+    ///
+    /// @param left first result.
+    /// @param right second result.
+    /// @return merged result.
+    private static ImageCacheCleanResult mergeCleanResults(ImageCacheCleanResult left, ImageCacheCleanResult right) {
+        if (right.removedBytes() == 0L && right.removedFiles() == 0 && right.skipped().isEmpty()) {
+            return left;
+        }
+        ArrayList<String> skipped = new ArrayList<>(left.skipped());
+        skipped.addAll(right.skipped());
+        return new ImageCacheCleanResult(
+                left.removedBytes() + right.removedBytes(),
+                left.removedFiles() + right.removedFiles(),
+                List.copyOf(skipped));
     }
 
     /// Command group for block device operations.

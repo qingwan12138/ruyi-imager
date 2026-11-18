@@ -138,7 +138,7 @@ final class CliProgressPrinter {
     ///
     /// @param bytes byte count.
     /// @return human-readable size.
-    private static String sizeLabel(long bytes) {
+    static String sizeLabel(long bytes) {
         double value = bytes;
         int unitIndex = 0;
         while (value >= 1024.0 && unitIndex < SIZE_UNITS.size() - 1) {
