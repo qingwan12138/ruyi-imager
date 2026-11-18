@@ -6,6 +6,7 @@ package org.glavo.ruyi.imager.core.image;
 import kala.compress.compressors.CompressorException;
 import kala.compress.compressors.CompressorOutputStream;
 import kala.compress.compressors.CompressorStreamFactory;
+import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.ProgressEvent;
 import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.StrategySupport;
@@ -29,6 +30,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -73,6 +75,44 @@ public final class RuyiImageMaterializerTest {
         assertEquals("Prepared image board-image/test-board(1.0.0)", last.message());
         assertEquals(1L, last.currentBytes());
         assertEquals(1L, last.totalBytes());
+    }
+
+    /// Keeps the staged first component when cleanup runs before materializing the second component.
+    @Test
+    public void protectsManagedInputsAndOutputFromCleanup(@TempDir Path root) throws Exception {
+        Path cache = root.resolve("cache");
+        Path first = Files.writeString(Files.createDirectories(cache.resolve("downloads/test/board-image/combo/1"))
+                .resolve("first.raw"), "first partition");
+        Path second = Files.writeString(Files.createDirectories(cache.resolve("artifacts/test/board-image/combo/1"))
+                .resolve("second.raw"), "second partition");
+        RuyiDistfile firstDistfile = image("first.raw", "raw", "first.raw").distfiles().getFirst();
+        RuyiDistfile secondDistfile = image("second.raw", "raw", "second.raw").distfiles().getFirst();
+        var image = new ImageEntry("test", "board-image", "combo", "2", null, "board-image/combo", "Combo",
+                "Vendor", "board", "generic", "dd-v1", Map.of("first", "first.raw", "second", "second.raw"),
+                List.of(firstDistfile, secondDistfile), StrategySupport.SUPPORTED);
+        Path artifacts = cache.resolve("artifacts/test/board-image/combo/2");
+        var cacheService = new ImageCacheService(new AppDirectories(root.resolve("config"), cache));
+        AtomicInteger events = new AtomicInteger();
+        Path result = new RuyiImageMaterializer().materialize(image, List.of(first, second), artifacts, cache, event -> {
+            if (event.stage().equals("materialize") && events.incrementAndGet() == 2) {
+                assertEquals(0, cacheService.cleanPartials().removedFiles());
+                assertEquals(0, cacheService.cleanAll().removedFiles());
+            }
+        });
+        assertTrue(events.get() >= 2);
+        assertEquals("first partition", Files.readString(result.resolve("first.raw")));
+        assertEquals("second partition", Files.readString(result.resolve("second.raw")));
+    }
+
+    /// A standalone output path resembling a cache does not create cache infrastructure.
+    @Test
+    public void doesNotInferCacheRootForStandaloneMaterialization(@TempDir Path root) throws Exception {
+        Path source = Files.writeString(root.resolve("image.raw"), "raw image");
+        Path output = root.resolve("artifacts/team/board/image/1");
+        Path result = new RuyiImageMaterializer().materialize(
+                image("image.raw", "raw", "image.raw"), List.of(source), output, NO_PROGRESS);
+        assertEquals("raw image", Files.readString(result));
+        assertFalse(Files.exists(root.resolve("downloads")));
     }
 
     /// Verifies successful materialization replaces stale files from previous runs.
@@ -375,6 +415,10 @@ public final class RuyiImageMaterializerTest {
         Path artifactDirectory = temporaryDirectory.resolve("artifacts");
         ImageEntry image = image("image.raw", null, "image.raw");
         RuyiImageMaterializer materializer = new RuyiImageMaterializer(1024L, 4096L, 10, Long.MAX_VALUE);
+        @Unmodifiable List<Path> before;
+        try (var children = Files.list(temporaryDirectory)) {
+            before = children.sorted().toList();
+        }
 
         assertThrows(IOException.class, () -> materializer.materialize(
                 image,
@@ -383,7 +427,7 @@ public final class RuyiImageMaterializerTest {
                 NO_PROGRESS));
         assertFalse(Files.exists(artifactDirectory));
         try (var children = Files.list(temporaryDirectory)) {
-            assertFalse(children.anyMatch(path -> path.getFileName().toString().startsWith("artifacts.tmp-")));
+            assertEquals(before, children.sorted().toList());
         }
     }
 

@@ -9,15 +9,18 @@ import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.repo.RuyiRepositoryStore;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Unmodifiable;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.nio.channels.FileChannel;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.List;
@@ -82,6 +85,103 @@ final class LocalImageImportTest {
         assertNoStaging(cache(root, image));
     }
 
+    /// Stages each copy on the destination filesystem and publishes only verified archives.
+    @Test
+    void stagesImportsBesideDestination(@TempDir Path root) throws Exception {
+        Path source = Files.writeString(root.resolve("source"), "shared disk content");
+        ImageEntry image = image("image", List.of(file("first.img", source, true), file("second.img", source, true)));
+        Path directory = cache(root, image);
+        AtomicInteger copies = new AtomicInteger();
+        var service = service(root);
+
+        assertTrue(service.prepareLocalImage(image, List.of(source), false, event -> {
+            if (!event.stage().equals("import")) {
+                return;
+            }
+            try (var entries = Files.list(directory)) {
+                @Unmodifiable List<Path> versionEntries = entries.toList();
+                assertEquals(1, versionEntries.size());
+                Path staging = versionEntries.getFirst();
+                assertTrue(Files.isDirectory(staging));
+                assertTrue(staging.getFileName().toString()
+                        .startsWith(RuyiImageCatalogService.IMPORT_STAGING_DIRECTORY_PREFIX));
+                try (var files = Files.list(staging)) {
+                    assertEquals(copies.incrementAndGet(), files.count());
+                }
+            } catch (IOException failure) {
+                throw new UncheckedIOException(failure);
+            }
+        }).isEmpty());
+        assertEquals(2, copies.get());
+        assertEquals("shared disk content", Files.readString(directory.resolve("first.img")));
+        assertEquals("shared disk content", Files.readString(directory.resolve("second.img")));
+        assertNoStaging(directory);
+    }
+
+    /// Imports one matching source into two archives with permissions limited to the owner.
+    @Test
+    void publishesOwnerOnlyFilesForBothImportCopies(@TempDir Path root) throws Exception {
+        Assumptions.assumeTrue(Files.getFileStore(root).supportsFileAttributeView("posix"));
+        Path source = Files.writeString(root.resolve("source"), "shared disk content");
+        ImageEntry image = image("image", List.of(file("first.img", source, true), file("second.img", source, true)));
+        assertTrue(service(root).prepareLocalImage(image, List.of(source), false, SILENT).isEmpty());
+        var expected = PosixFilePermissions.fromString("rw-------");
+        assertEquals(expected, Files.getPosixFilePermissions(cache(root, image).resolve("first.img")));
+        assertEquals(expected, Files.getPosixFilePermissions(cache(root, image).resolve("second.img")));
+    }
+
+    /// Relocates a lowercase staging directory when a declared import names its equivalent alias.
+    @Test
+    void relocatesStagingAliasForLocalImport(@TempDir Path root) throws Exception {
+        Path source = Files.writeString(root.resolve("source"), "disk content");
+        String archiveName = ".DOWNLOAD-PARTIALS-0";
+        ImageEntry image = image("image", List.of(file(archiveName, source, true)));
+        Path version = cache(root, image);
+        Path staging = Files.createDirectories(version.resolve(".download-partials-0"));
+        Assumptions.assumeTrue(Files.exists(version.resolve(archiveName)), "filesystem treats case variants as aliases");
+        Files.writeString(staging.resolve("other.part"), "resume");
+
+        assertTrue(service(root).prepareLocalImage(image, List.of(source), false, SILENT).isEmpty());
+        assertEquals("disk content", Files.readString(version.resolve(archiveName)));
+        assertEquals("resume", Files.readString(version.resolve(".download-partials-1/other.part")));
+    }
+
+    /// Protects distinct managed inputs and shares leases for aliases of the same version.
+    @Test
+    void protectsAllInputVersionsBeforeCopyingLocalFiles(@TempDir Path root) throws Exception {
+        Path cache = root.resolve("cache");
+        Path first = Files.writeString(Files.createDirectories(cache.resolve("downloads/test/board-image/combo/1"))
+                .resolve("first.raw"), "first partition");
+        Path second = Files.writeString(Files.createDirectories(cache.resolve("artifacts/test/board-image/combo/1"))
+                .resolve("second.raw"), "second partition");
+        Path third = Files.writeString(Files.createDirectories(cache.resolve("downloads/test/board-image/combo/2"))
+                .resolve("third.raw"), "third partition");
+        Path unrelated = Files.writeString(Files.createDirectories(cache.resolve("downloads/test/board-image/combo/3"))
+                .resolve("unused.raw"), "unused");
+        Path caseAlias = cache.resolve("ARTIFACTS/test/BOARD-IMAGE/combo/1/second.raw");
+        if (Files.exists(caseAlias) && Files.isSameFile(second, caseAlias)) {
+            second = caseAlias;
+        }
+        var image = new ImageEntry("test", "board-image", "combo", "2", null, "board-image/combo", "Combo",
+                "Vendor", "board", "generic", "dd-v1", Map.of("first", "first.raw", "second", "second.raw",
+                "third", "third.raw"),
+                List.of(file("first.raw", first, true), file("second.raw", second, true), file("third.raw", third, true)),
+                StrategySupport.SUPPORTED);
+        var cleanup = new ImageCacheService(new AppDirectories(root.resolve("config"), cache));
+        var copies = new AtomicInteger();
+        assertTrue(service(root).prepareLocalImage(image, List.of(first, second, third), false, event -> {
+            if (event.stage().equals("import") && copies.getAndIncrement() == 0) {
+                assertEquals(1, cleanup.cleanAll().removedFiles());
+            }
+        }).isEmpty());
+        assertTrue(copies.get() > 0);
+        assertFalse(Files.exists(unrelated));
+        assertEquals("first partition", Files.readString(first));
+        assertEquals("second partition", Files.readString(second));
+        assertEquals("third partition", Files.readString(third));
+        assertEquals("second partition", Files.readString(third.resolveSibling("second.raw")));
+    }
+
     /// Missing components remain explicit until additional local files are supplied.
     @Test
     void requiresAllFilesBeforePreparation(@TempDir Path root) throws Exception {
@@ -137,19 +237,34 @@ final class LocalImageImportTest {
         assertNoStaging(directory);
     }
 
+    /// Publishing fails when a different archive occupies the destination.
+    @Test
+    void publicationPreservesExistingDestination(@TempDir Path root) throws Exception {
+        Path source = Files.writeString(root.resolve("staged"), "expected");
+        Path target = Files.writeString(root.resolve("disk.img"), "keep this archive");
+        RuyiDistfile file = file("disk.img", source, true);
+
+        assertThrows(IOException.class, () -> RuyiImageCatalogService.publishLocalImport(source, target, file));
+        assertEquals("keep this archive", Files.readString(target));
+        assertEquals("expected", Files.readString(source));
+    }
+
     /// Import and download both respect the same cache lock.
     @Test
     void sharesLockWithDownloader(@TempDir Path root) throws Exception {
         Path source = Files.writeString(root.resolve("source"), "expected");
         ImageEntry image = image("image", List.of(file("disk.img", source, false)));
-        Path directory = Files.createDirectories(cache(root, image));
-        try (var channel = FileChannel.open(directory.resolveSibling("1.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-             var lock = channel.lock()) {
+        Path directory = cache(root, image);
+        try (@Nullable CacheLock lock = CacheLock.acquire(directory.resolveSibling("1.lock"))) {
+            assertNotNull(lock);
             var service = service(root);
             assertThrows(IOException.class, () -> service.prepareLocalImage(image, List.of(source), false, SILENT));
+            assertFalse(Files.exists(directory));
             assertThrows(IOException.class, () -> service.downloadImage(image, SILENT));
+            assertFalse(Files.exists(directory));
+            assertThrows(IOException.class, () -> service.withDownloadedImage(image, SILENT, path -> path));
+            assertFalse(Files.exists(directory));
         }
-        assertFalse(Files.exists(directory.resolve("disk.img")));
     }
 
     /// Empty files cannot establish an image identity or be imported.
@@ -256,6 +371,25 @@ final class LocalImageImportTest {
     private static void assertNoStaging(Path directory) throws IOException {
         try (var files = Files.list(directory)) {
             assertTrue(files.noneMatch(path -> path.getFileName().toString().startsWith(".import-")));
+        }
+        @Nullable Path name = directory.getParent();
+        @Nullable Path category = name == null ? null : name.getParent();
+        @Nullable Path repo = category == null ? null : category.getParent();
+        @Nullable Path downloads = repo == null ? null : repo.getParent();
+        @Nullable Path cacheRoot = downloads == null ? null : downloads.getParent();
+        if (cacheRoot == null) {
+            return;
+        }
+        Path imports = cacheRoot.resolve("imports")
+                .resolve(repo.getFileName().toString())
+                .resolve(category.getFileName().toString())
+                .resolve(name.getFileName().toString())
+                .resolve(directory.getFileName().toString());
+        if (!Files.isDirectory(imports)) {
+            return;
+        }
+        try (var files = Files.walk(imports)) {
+            assertTrue(files.noneMatch(Files::isRegularFile));
         }
     }
 }

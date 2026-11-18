@@ -6,6 +6,7 @@ package org.glavo.ruyi.imager.core.image;
 import jdk.jfr.Recording;
 import jdk.jfr.consumer.RecordingFile;
 import org.glavo.ruyi.imager.core.AppDirectories;
+import org.glavo.ruyi.imager.core.ProgressReporter;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.repo.RuyiRepositoryStore;
 import org.jetbrains.annotations.NotNullByDefault;
@@ -15,7 +16,11 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -29,7 +34,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /// Tests for Ruyi image catalog parsing.
 @NotNullByDefault
@@ -77,6 +84,29 @@ public final class RuyiImageCatalogServiceTest {
         assertEquals(List.of("images"), distfile.prefixesToUnpack());
     }
 
+    /// Rereads repository files before classifying a newly declared archive as a partial.
+    @Test
+    public void cleanupUsesUpdatedRepositoryDespiteCachedCatalog(@TempDir Path directory) throws Exception {
+        Path config = Files.createDirectory(directory.resolve("config"));
+        Path cache = directory.resolve("cache");
+        Path repository = directory.resolve("repo");
+        writeConfig(config, repository);
+        writeRepository(repository);
+        AppDirectories directories = new AppDirectories(config, cache);
+        var service = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        assertEquals("image.raw", service.listImages().images().getFirst().distfiles().getFirst().name());
+        assertEquals("image.raw", service.declaredImages().getFirst().distfiles().getFirst().name());
+
+        writeImageManifest(repository, "1.2.3", "Updated image", "revyos-meles", "image.raw.part");
+        Path download = cache.resolve("downloads/ruyisdk/board-image/revyos-milkv-meles/1.2.3/image.raw.part");
+        Files.createDirectories(download.getParent());
+        Files.writeString(download, "complete archive");
+        var result = new ImageCacheService(directories, service).cleanPartials();
+
+        assertEquals(0, result.removedFiles());
+        assertEquals("complete archive", Files.readString(download));
+    }
+
     /// Verifies image metadata is cached until explicitly invalidated.
     ///
     /// @param temporaryDirectory temporary test directory.
@@ -100,7 +130,11 @@ public final class RuyiImageCatalogServiceTest {
         ImageCatalog cachedCatalog = service.listImages();
 
         assertEquals(firstCatalog, cachedCatalog);
-        assertEquals("Original image", cachedCatalog.images().getFirst().displayName());
+        ImageEntry original = cachedCatalog.images().getFirst();
+        assertEquals("Original image", original.displayName());
+        assertEquals("Updated image", service.freshPackageDeclarations(
+                original.repoId(), original.category(), original.name()).getFirst().displayName());
+        assertEquals(firstCatalog, service.listImages());
 
         service.invalidateCache();
         ImageCatalog refreshedCatalog = service.listImages();
@@ -424,6 +458,8 @@ public final class RuyiImageCatalogServiceTest {
         assertNotNull(combo);
         assertEquals("image-combo", combo.category());
         assertEquals("revyos-sipeed-lpi4a@8g", combo.name());
+        assertEquals(combo.atom(), service.freshPackageDeclarations(
+                combo.repoId(), combo.category(), combo.name()).getFirst().atom());
         assertEquals("0.20251226.0", combo.version());
         assertEquals("image-combo/revyos-sipeed-lpi4a@8g(0.20251226.0)", combo.atom());
         assertEquals("RevyOS for Sipeed LicheePi 4A (8G RAM)", combo.displayName());
@@ -653,7 +689,9 @@ public final class RuyiImageCatalogServiceTest {
                 .resolve("revyos-milkv-meles")
                 .resolve("1.2.3");
         Files.createDirectories(downloadDirectory);
-        Files.write(downloadDirectory.resolve("image.raw.part"), new byte[512]);
+        Path resumeDirectory = Files.createDirectory(
+                downloadDirectory.resolve(RuyiDistfileDownloader.DOWNLOAD_PARTIAL_DIRECTORY_PREFIX + "0"));
+        Files.write(resumeDirectory.resolve("image.raw.part"), new byte[512]);
 
         ImageCacheStatus partialStatus = service.cacheStatus(image);
         assertEquals(ImageCacheStatus.State.PARTIAL, partialStatus.state());
@@ -952,4 +990,277 @@ public final class RuyiImageCatalogServiceTest {
                         strategy,
                         distfileName));
     }
-}
+    /// Keeps the cache version locked from download until the caller finishes using the image.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be created or read.
+    @Test
+    public void keepsCacheLockWhileImageIsUsed(@TempDir Path temporaryDirectory) throws Exception {
+        Path configDirectory = temporaryDirectory.resolve("config");
+        Path cacheDirectory = temporaryDirectory.resolve("cache");
+        Path repoDirectory = temporaryDirectory.resolve("repo");
+        Files.createDirectories(configDirectory);
+        writeConfig(configDirectory, repoDirectory);
+        writeRepositoryConfig(repoDirectory);
+        byte[] content = "materialized-image".getBytes(StandardCharsets.UTF_8);
+        String checksum = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        writeImageManifestWithChecksum(repoDirectory, "image.raw", content.length, checksum);
+        Path downloads = cacheDirectory
+                .resolve("downloads")
+                .resolve("ruyisdk")
+                .resolve("board-image")
+                .resolve("revyos-milkv-meles")
+                .resolve("1.2.3");
+        Files.createDirectories(downloads);
+        Path cachedDistfile = downloads.resolve("image.raw");
+        Files.write(cachedDistfile, content);
+
+        AppDirectories directories = new AppDirectories(configDirectory, cacheDirectory);
+        RuyiImageCatalogService service = new RuyiImageCatalogService(
+                directories,
+                new RuyiRepositoryStore(directories));
+        ImageEntry image = service.listImages().images().getFirst();
+        ProgressReporter reporter = _ -> { };
+
+        service.withDownloadedImage(image, reporter, _ -> {
+            ImageCacheService cache = new ImageCacheService(directories);
+            ImageCacheCleanResult blocked = cache.cleanEntries(cache.usage().entries());
+            assertTrue(Files.exists(cachedDistfile));
+            assertFalse(blocked.skipped().isEmpty());
+            return null;
+        });
+
+        ImageCacheService cache = new ImageCacheService(directories);
+        ImageCacheCleanResult cleaned = cache.cleanEntries(cache.usage().entries());
+        assertTrue(cleaned.skipped().isEmpty(), cleaned.skipped().toString());
+        assertFalse(Files.exists(cachedDistfile));
+    }
+
+    /// Leaves no staging files behind after a successful local import.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be created or read.
+    @Test
+    public void leavesNoImportStagingAfterSuccessfulImport(@TempDir Path temporaryDirectory) throws Exception {
+        Path configDirectory = temporaryDirectory.resolve("config");
+        Path cacheDirectory = temporaryDirectory.resolve("cache");
+        Path repoDirectory = temporaryDirectory.resolve("repo");
+        Files.createDirectories(configDirectory);
+        writeConfig(configDirectory, repoDirectory);
+        writeRepositoryConfig(repoDirectory);
+        byte[] content = "imported-image".getBytes(StandardCharsets.UTF_8);
+        String checksum = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        writeImageManifestWithChecksum(repoDirectory, "image.raw", content.length, checksum);
+        Path source = temporaryDirectory.resolve("source.raw");
+        Files.write(source, content);
+
+        AppDirectories directories = new AppDirectories(configDirectory, cacheDirectory);
+        RuyiImageCatalogService service = new RuyiImageCatalogService(
+                directories,
+                new RuyiRepositoryStore(directories));
+        ImageEntry image = service.listImages().images().getFirst();
+
+        List<RuyiDistfile> missing = service.prepareLocalImage(image, List.of(source), false, _ -> { });
+
+        assertTrue(missing.isEmpty(), missing.toString());
+        Path versionDirectory = cacheDirectory.resolve("downloads").resolve(image.repoId())
+                .resolve(image.category()).resolve(image.name()).resolve(image.version());
+        assertTrue(Files.isRegularFile(versionDirectory.resolve("image.raw")));
+        try (var entries = Files.list(versionDirectory)) {
+            assertTrue(entries.noneMatch(path -> path.getFileName().toString()
+                    .startsWith(RuyiImageCatalogService.IMPORT_STAGING_DIRECTORY_PREFIX)));
+        }
+    }
+
+    /// Clears a legacy marker when a local import publishes a complete archive.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be created or read.
+    @Test
+    public void clearsLegacyMarkerWhenImportPublishesArchive(@TempDir Path temporaryDirectory) throws Exception {
+        Path configDirectory = temporaryDirectory.resolve("config");
+        Path cacheDirectory = temporaryDirectory.resolve("cache");
+        Path repoDirectory = temporaryDirectory.resolve("repo");
+        Files.createDirectories(configDirectory);
+        writeConfig(configDirectory, repoDirectory);
+        writeRepositoryConfig(repoDirectory);
+        byte[] content = "imported-image".getBytes(StandardCharsets.UTF_8);
+        String checksum = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        writeImageManifestWithChecksum(repoDirectory, "image.raw.part", content.length, checksum);
+        Path source = temporaryDirectory.resolve("source.raw");
+        Files.write(source, content);
+
+        AppDirectories directories = new AppDirectories(configDirectory, cacheDirectory);
+        RuyiImageCatalogService service = new RuyiImageCatalogService(
+                directories,
+                new RuyiRepositoryStore(directories));
+        ImageEntry image = service.listImages().images().getFirst();
+
+        Path versionDirectory = cacheDirectory.resolve("downloads").resolve(image.repoId())
+                .resolve(image.category()).resolve(image.name()).resolve(image.version());
+        Files.createDirectories(versionDirectory);
+        Path target = versionDirectory.resolve("image.raw.part");
+        ImageCacheMarkers.write(cacheDirectory, target);
+
+        assertTrue(service.prepareLocalImage(image, List.of(source), false, _ -> { }).isEmpty());
+        assertFalse(ImageCacheMarkers.exists(cacheDirectory, target));
+    }
+
+    /// Keeps the original import error when deletion of the staging directory also fails.
+    @Test
+    public void suppressesImportCleanupFailure(@TempDir Path temporaryDirectory) throws Exception {
+        Path configDirectory = temporaryDirectory.resolve("config");
+        Path cacheDirectory = temporaryDirectory.resolve("cache");
+        Path repoDirectory = temporaryDirectory.resolve("repo");
+        Files.createDirectories(configDirectory);
+        writeConfig(configDirectory, repoDirectory);
+        writeRepositoryConfig(repoDirectory);
+        byte[] content = "imported-image".getBytes(StandardCharsets.UTF_8);
+        String checksum = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        writeImageManifestWithChecksum(repoDirectory, "image.raw.part", content.length, checksum);
+        Path source = temporaryDirectory.resolve("source.raw");
+        Files.write(source, content);
+
+        AppDirectories directories = new AppDirectories(configDirectory, cacheDirectory);
+        RuyiImageCatalogService service = new RuyiImageCatalogService(
+                directories,
+                new RuyiRepositoryStore(directories));
+        ImageEntry image = service.listImages().images().getFirst();
+
+        Path versionDirectory = cacheDirectory.resolve("downloads").resolve(image.repoId())
+                .resolve(image.category()).resolve(image.name()).resolve(image.version());
+        Files.createDirectories(versionDirectory);
+        IllegalStateException copyFailure = new IllegalStateException("copy failed");
+        var failure = assertThrows(IllegalStateException.class, () ->
+                service.prepareLocalImage(image, List.of(source), false, event -> {
+                    try (var entries = Files.list(versionDirectory)) {
+                        Path staging = entries.filter(path -> path.getFileName().toString()
+                                .startsWith(RuyiImageCatalogService.IMPORT_STAGING_DIRECTORY_PREFIX))
+                                .findFirst().orElseThrow();
+                        Files.writeString(staging.resolve("residual"), "retain this entry");
+                    } catch (IOException exception) {
+                        throw new java.io.UncheckedIOException(exception);
+                    }
+                    throw copyFailure;
+                }));
+
+        assertSame(copyFailure, failure);
+        assertEquals(1, failure.getSuppressed().length);
+        org.junit.jupiter.api.Assertions.assertInstanceOf(java.nio.file.DirectoryNotEmptyException.class, failure.getSuppressed()[0]);
+    }
+
+    /// Shares the physical cache root across the lock, downloads, and artifacts.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be created or read.
+    @Test
+    public void materializesBelowThePhysicalCacheRoot(@TempDir Path temporaryDirectory) throws Exception {
+        Path configDirectory = temporaryDirectory.resolve("config");
+        Path physicalCache = temporaryDirectory.resolve("cache");
+        Path cacheDirectory = physicalCache.resolve("..").resolve(physicalCache.getFileName());
+        Path repoDirectory = temporaryDirectory.resolve("repo");
+        Files.createDirectories(configDirectory);
+        writeConfig(configDirectory, repoDirectory);
+        writeRepositoryConfig(repoDirectory);
+        byte[] content = "materialized-image".getBytes(StandardCharsets.UTF_8);
+        String checksum = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        writeImageManifestWithChecksum(repoDirectory, "image.raw", content.length, checksum);
+        Path cachedDistfile = physicalCache
+                .resolve("downloads")
+                .resolve("ruyisdk")
+                .resolve("board-image")
+                .resolve("revyos-milkv-meles")
+                .resolve("1.2.3")
+                .resolve("image.raw");
+        Files.createDirectories(cachedDistfile.getParent());
+        Files.write(cachedDistfile, content);
+
+        AppDirectories directories = new AppDirectories(configDirectory, cacheDirectory);
+        RuyiImageCatalogService service = new RuyiImageCatalogService(
+                directories,
+                new RuyiRepositoryStore(directories));
+        ImageEntry image = service.listImages().images().getFirst();
+        Path physicalRoot = physicalCache.toRealPath();
+
+        Path materialized = service.withDownloadedImage(image, _ -> { }, path -> path);
+
+        assertTrue(materialized.toAbsolutePath().normalize().startsWith(physicalRoot),
+                "materialized path must use the physical cache root: " + materialized);
+        assertFalse(materialized.toString().contains(".."),
+                "materialized path must not keep the configured alias spelling: " + materialized);
+        assertTrue(Files.exists(materialized));
+    }
+
+    /// Publishes without hard links and preserves an existing destination.
+    @Test
+    public void publishesWithoutReplacingExistingTargets(@TempDir Path directory) throws Exception {
+        RuyiDistfile file = new RuyiDistfile(
+                "image.raw", List.of(), null, java.util.Map.of(), false, false, null, 0, List.of(), null);
+
+        Path staged = Files.writeString(directory.resolve("staged"), "new image");
+        Path target = directory.resolve("image.raw");
+        assertTrue(RuyiImageCatalogService.publishWithoutReplacing(staged, target, file, new IOException("no links")));
+        assertFalse(Files.exists(staged));
+        assertEquals("new image", Files.readString(target));
+
+        Path stagedCopy = Files.writeString(directory.resolve("staged-copy"), "new image");
+        Path keptTarget = Files.writeString(directory.resolve("kept.raw"), "kept image");
+        assertTrue(RuyiImageCatalogService.publishWithoutReplacing(
+                stagedCopy, keptTarget, file, new IOException("no links")));
+        assertEquals("kept image", Files.readString(keptTarget));
+        assertEquals("new image", Files.readString(stagedCopy));
+
+        RuyiDistfile checksummed = new RuyiDistfile(
+                "image.raw", List.of(), 10L,
+                java.util.Map.of("sha256", "0".repeat(64)), false, false, null, 0, List.of(), null);
+        Path conflicting = Files.writeString(directory.resolve("staged-conflict"), "other image");
+        Path occupied = Files.writeString(directory.resolve("existing.raw"), "existing");
+        assertThrows(IOException.class,
+                () -> RuyiImageCatalogService.publishWithoutReplacing(
+                        conflicting, occupied, checksummed, new IOException("no links")));
+        assertEquals("existing", Files.readString(occupied));
+        assertEquals("other image", Files.readString(conflicting));
+    }
+
+    /// Writes one image manifest with a real checksum so the cached distfile can be verified.
+    ///
+    /// @param repoDirectory repository directory.
+    /// @param distfileName distfile name.
+    /// @param size distfile size.
+    /// @param checksum SHA-256 checksum.
+    /// @throws Exception when fixture files cannot be written.
+    private static void writeImageManifestWithChecksum(
+            Path repoDirectory,
+            String distfileName,
+            long size,
+            String checksum) throws Exception {
+        Path packageDirectory = repoDirectory.resolve("packages").resolve("board-image").resolve("revyos-milkv-meles");
+        Files.createDirectories(packageDirectory);
+        Files.writeString(
+                packageDirectory.resolve("1.2.3.toml"),
+                """
+                        format = "v1"
+                        kind = ["blob", "provisionable"]
+
+                        [metadata]
+                        desc = "RevyOS image for Milk-V Meles"
+                        slug = "revyos-meles"
+                        vendor = { name = "FreeBSD", eula = "" }
+
+                        [[distfiles]]
+                        name = "%s"
+                        size = %d
+
+                        [distfiles.checksums]
+                        sha256 = "%s"
+
+                        [blob]
+                        distfiles = ["%s"]
+
+                        [provisionable]
+                        strategy = "dd-v1"
+
+                        [provisionable.partition_map]
+                        disk = "%s"
+                        """.formatted(distfileName, size, checksum, distfileName, distfileName));
+    }}

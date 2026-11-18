@@ -21,6 +21,27 @@ public interface ImageCatalogService {
     /// @throws IOException when local metadata cannot be read.
     ImageCatalog listImages() throws IOException;
 
+    /// Lists every declared image without cross-repository de-duplication.
+    ///
+    /// @return every declared image, duplicates across repositories included.
+    /// @throws IOException when local metadata cannot be read.
+    default @Unmodifiable List<ImageEntry> declaredImages() throws IOException {
+        return listImages().images();
+    }
+
+    /// Reads current declarations for one package, including repositories hidden by priority.
+    ///
+    /// @param repoId owning repository.
+    /// @param category package category.
+    /// @param name package name.
+    /// @return declarations from the current repository metadata.
+    default @Unmodifiable List<ImageEntry> freshPackageDeclarations(String repoId, String category, String name)
+            throws IOException {
+        invalidateCache();
+        return declaredImages().stream().filter(image -> image.repoId().equals(repoId)
+                && image.category().equals(category) && image.name().equals(name)).toList();
+    }
+
     /// Invalidates any in-memory metadata cache maintained by this service.
     default void invalidateCache() {
     }
@@ -50,6 +71,42 @@ public interface ImageCatalogService {
     /// @return local image path.
     /// @throws IOException when download or validation fails.
     Path downloadImage(ImageEntry image, ProgressReporter reporter) throws IOException;
+
+    /// Downloads an image and runs an action on the result.
+    ///
+    /// Implementations that share a cleanable cache must override this method and hold the version
+    /// lock from the start of the download until the action returns. The default implementation does
+    /// not acquire a cache lease.
+    ///
+    /// @param image image to download.
+    /// @param reporter progress reporter.
+    /// @param action action receiving the materialized path.
+    /// @param <T> action result type.
+    /// @return action result.
+    /// @throws IOException when the download, the materialization or the action fails.
+    default <T> T withDownloadedImage(
+            ImageEntry image,
+            ProgressReporter reporter,
+            ImageAccess<T> action) throws IOException {
+        return action.run(downloadImage(image, reporter));
+    }
+
+    /// Returns whether [#withDownloadedImage] keeps the cache version locked.
+    ///
+    /// @return whether materialized images are protected by a cache lock.
+    default boolean supportsCacheLease() {
+        return false;
+    }
+
+    /// Returns the root of this catalog's shared image cache, when it uses Ruyi Imager's layout.
+    ///
+    /// The [org.glavo.ruyi.imager.core.flash.LocalFlashService] uses this root to find the version
+    /// lock for local images and for downloaded artifacts when the catalog does not provide a lease.
+    ///
+    /// @return shared cache root, or null when no compatible cache is known.
+    default @Nullable Path cacheDirectory() {
+        return null;
+    }
 
     /// Imports matching local distfiles and prepares a complete image without accessing a device.
     /// @param image explicitly selected catalog candidate.

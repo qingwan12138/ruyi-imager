@@ -23,12 +23,17 @@ import org.tomlj.TomlParseResult;
 import org.tomlj.TomlTable;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -43,6 +48,9 @@ import org.slf4j.LoggerFactory;
 /// Ruyi-backed image catalog service.
 @NotNullByDefault
 public final class RuyiImageCatalogService implements ImageCatalogService {
+    /// Prefix of local import staging directories inside a download version.
+    static final String IMPORT_STAGING_DIRECTORY_PREFIX = ".import-staging-";
+
     /// Logger for image catalog operations.
     private static final Logger LOGGER = LoggerFactory.getLogger(RuyiImageCatalogService.class);
 
@@ -72,6 +80,9 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
 
     /// Cached catalog snapshot read from repository metadata.
     private @Nullable ImageCatalog cachedCatalog;
+
+    /// Cached catalog containing every repository declaration, or null when not loaded.
+    private @Nullable ImageCatalog declaredCatalog;
 
     /// Creates the catalog service.
     ///
@@ -123,26 +134,78 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
             return catalog;
         }
 
-        catalog = loadImages();
+        catalog = loadImages(true);
         cachedCatalog = catalog;
         return catalog;
+    }
+
+    /// Lists every declared image from each repository without cross-repository de-duplication.
+    ///
+    /// @return every declared image.
+    /// @throws IOException when local metadata cannot be read.
+    @Override
+    public synchronized @Unmodifiable List<ImageEntry> declaredImages() throws IOException {
+        @Nullable ImageCatalog catalog = declaredCatalog;
+        if (catalog == null) {
+            catalog = loadImages(false);
+            declaredCatalog = catalog;
+        }
+        return catalog.images();
+    }
+
+    /// Reads current declarations from the owning repository without invalidating other cached images.
+    @Override
+    public @Unmodifiable List<ImageEntry> freshPackageDeclarations(String repoId, String category, String name)
+            throws IOException {
+        for (RuyiRepositoryEntry entry : repositoryStore.readActiveEntries()) {
+            if (!repoId.equals(entry.id()) || !Files.isDirectory(repositoryStore.resolveRoot(entry))) {
+                continue;
+            }
+            RuyiRepositoryMetadata metadata = repositoryStore.readMetadata(entry);
+            @Nullable Path packages = resolvePackageRoot(metadata.root());
+            if (packages == null) {
+                return List.of();
+            }
+            if ("image-combo".equals(category)) {
+                // A combo can reference any package in this repository by name or slug.
+                return readRepositoryImages(metadata, name).stream().filter(image -> image.category().equals(category)
+                        && image.name().equals(name)).toList();
+            }
+            ArrayList<ImageEntry> result = new ArrayList<>();
+            try (var categories = Files.newDirectoryStream(packages,
+                    child -> child.getFileName().toString().equals(category) && Files.isDirectory(child))) {
+                for (Path categoryPath : categories) {
+                    try (var matches = Files.newDirectoryStream(categoryPath,
+                            child -> child.getFileName().toString().equals(name) && Files.isDirectory(child))) {
+                        for (Path match : matches) {
+                            readPackage(metadata, category, match, readDeviceIds(metadata.root()),
+                                    readRepoMessages(metadata.root().resolve("messages.toml")), result);
+                        }
+                    }
+                }
+            }
+            return List.copyOf(result);
+        }
+        return List.of();
     }
 
     /// Invalidates the in-memory image catalog cache.
     @Override
     public synchronized void invalidateCache() {
         cachedCatalog = null;
+        declaredCatalog = null;
         LOGGER.info("Image catalog cache invalidated.");
     }
 
     /// Loads images from repository metadata.
     ///
+    /// @param deduplicate whether images declared by several repositories collapse to one entry.
     /// @return loaded image catalog.
     /// @throws IOException when local metadata cannot be read.
-    private ImageCatalog loadImages() throws IOException {
+    private ImageCatalog loadImages(boolean deduplicate) throws IOException {
         LOGGER.info("Listing image catalog.");
         ArrayList<ImageEntry> images = new ArrayList<>();
-        HashSet<String> seenPackages = new HashSet<>();
+        HashSet<List<String>> seenPackages = new HashSet<>();
 
         for (RuyiRepositoryEntry entry : repositoryStore.readActiveEntries()) {
             Path root = repositoryStore.resolveRoot(entry);
@@ -153,9 +216,8 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
 
             RuyiRepositoryMetadata metadata = repositoryStore.readMetadata(entry);
             int beforeCount = images.size();
-            for (ImageEntry image : readRepositoryImages(metadata)) {
-                String key = image.category() + "/" + image.name() + "(" + image.version() + ")";
-                if (seenPackages.add(key)) {
+            for (ImageEntry image : readRepositoryImages(metadata, null)) {
+                if (!deduplicate || seenPackages.add(List.of(image.category(), image.name(), image.version()))) {
                     images.add(image);
                 }
             }
@@ -176,11 +238,56 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     /// @throws IOException when the download directory cannot be prepared.
     @Override
     public Path downloadImage(ImageEntry image, ProgressReporter reporter) throws IOException {
-        Path directory = downloadDirectory(image);
-        Files.createDirectories(directory);
-        try (var channel = FileChannel.open(directory.resolveSibling(directory.getFileName() + ".lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-             var lock = lockCache(channel)) {
-            return downloadAndMaterialize(image, reporter);
+        // Use one physical cache root for the lock, downloads, and artifacts.
+        Path root = physicalCacheRoot();
+        Path directory = downloadDirectory(root, image);
+        try (@Nullable CacheLock cacheLock = CacheLock.acquireVersion(root,
+                directory.resolveSibling(directory.getFileName() + ".lock"))) {
+            if (cacheLock == null) {
+                throw new IOException(SdkMessages.get("core.local.cacheBusy"));
+            }
+            return downloadAndMaterialize(image, root, reporter);
+        }
+    }
+
+    /// Reports support for holding a version lock across download and the caller's action.
+    ///
+    /// @return true because this catalog can keep a cache lease for the entire action.
+    @Override
+    public boolean supportsCacheLease() {
+        return true;
+    }
+
+    /// Returns the cache root that uses the standard per-version lock layout.
+    ///
+    /// @return application cache root.
+    @Override
+    public Path cacheDirectory() {
+        return directories.cacheDirectory();
+    }
+
+    /// Holds the version lock from the start of the download until the action returns.
+    ///
+    /// @param image image metadata.
+    /// @param reporter progress reporter.
+    /// @param action action to perform with the materialized image.
+    /// @param <T> action result type.
+    /// @return action result.
+    /// @throws IOException when the lock, download, materialization, or action fails.
+    @Override
+    public <T> T withDownloadedImage(
+            ImageEntry image,
+            ProgressReporter reporter,
+            ImageAccess<T> action) throws IOException {
+        // Use one physical cache root for the lock, downloads, and artifacts.
+        Path root = physicalCacheRoot();
+        Path directory = downloadDirectory(root, image);
+        try (@Nullable CacheLock cacheLock = CacheLock.acquireVersion(root,
+                directory.resolveSibling(directory.getFileName() + ".lock"))) {
+            if (cacheLock == null) {
+                throw new IOException(SdkMessages.get("core.local.cacheBusy"));
+            }
+            return action.run(downloadAndMaterialize(image, root, reporter));
         }
     }
 
@@ -199,13 +306,13 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 }
             }
         }
-        Path directory = downloadDirectory(image);
-        Files.createDirectories(directory);
-        try (var channel = FileChannel.open(directory.resolveSibling(directory.getFileName() + ".lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-             var lock = lockCache(channel)) {
+        Path root = physicalCacheRoot();
+        Path directory = downloadDirectory(root, image);
+        try (var leases = CacheInputLeases.acquire(root, directory.resolveSibling(directory.getFileName() + ".lock"), sources)) {
+            Files.createDirectories(directory);
             Set<RuyiDistfile> imported = new HashSet<>();
-            for (Path source : sources) {
-                imported.addAll(importLocalFile(image, source, directory, reporter));
+            for (Path source : leases.inputs()) {
+                imported.addAll(importLocalFile(image, source, root, directory, reporter));
             }
             List<RuyiDistfile> missing = new ArrayList<>();
             List<Path> verifiedFiles = new ArrayList<>();
@@ -214,20 +321,24 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 Path cached = directory.resolve(file.name());
                 if (imported.contains(file)
                         || (DistfileIntegrity.hasSupportedChecksum(file) && DistfileIntegrity.verify(cached, file))) {
+                    ImageCacheMarkers.clearArchiveMarker(root, cached);
                     verifiedFiles.add(cached);
                 } else if (allowDownload) {
                     if (!DistfileIntegrity.hasSupportedChecksum(file)) {
                         throw new IOException(SdkMessages.get("core.download.noSupportedChecksum", file.name()));
                     }
-                    verifiedFiles.add(downloader.download(file, directory, reporter));
+                    verifiedFiles.add(downloader.download(file, directory, root, image.distfiles(), reporter));
                 } else {
+                    if (file.fetchRestricted()) {
+                        RuyiDistfileDownloader.relocateStaging(directory, file, image.distfiles());
+                    }
                     missing.add(file);
                 }
             }
             if (!missing.isEmpty()) {
                 return List.copyOf(missing);
             }
-            Path prepared = materialize(image, verifiedFiles, reporter);
+            Path prepared = materialize(image, root, verifiedFiles, reporter);
             for (String relative : image.partitionMap().values()) {
                 Path partition = Files.isDirectory(prepared) ? prepared.resolve(relative) : prepared;
                 if (Files.size(partition) == 0) {
@@ -239,32 +350,25 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         }
     }
 
-    /// Acquires an exclusive cache lock, failing rather than racing another operation.
-    private static FileLock lockCache(FileChannel channel) throws IOException {
-        try {
-            @Nullable FileLock lock = channel.tryLock();
-            if (lock != null) {
-                return lock;
-            }
-        } catch (OverlappingFileLockException e) {
-            throw new IOException(SdkMessages.get("core.local.cacheBusy"), e);
-        }
-        throw new IOException(SdkMessages.get("core.local.cacheBusy"));
-    }
-
     /// Copies into isolated staging before identifying and publishing matching cache entries.
-    private static @Unmodifiable List<RuyiDistfile> importLocalFile(
-            ImageEntry image, Path source, Path directory, ProgressReporter reporter) throws IOException {
+    ///
+    /// The caller holds the version lock through archive verification and publication.
+    private @Unmodifiable List<RuyiDistfile> importLocalFile(
+            ImageEntry image, Path source, Path root, Path directory, ProgressReporter reporter) throws IOException {
         long size = Files.size(source);
         if (size == 0 || image.distfiles().stream().noneMatch(file ->
                 DistfileIntegrity.hasSupportedChecksum(file)
                         && (file.sizeBytes() == null || file.sizeBytes() == size))) {
             throw new IOException(SdkMessages.get("core.local.noMatch", source));
         }
-        Path staging = Files.createTempFile(directory, ".import-", ".tmp");
-        try {
+        // Stage under the version so publication cannot turn into a cross-filesystem copy.
+        Path stagingDirectory = Files.createTempDirectory(directory, IMPORT_STAGING_DIRECTORY_PREFIX);
+        Path staging = stagingDirectory.resolve("source");
+        Path publication = stagingDirectory.resolve("publication");
+        try (Cleanup _ = () -> Files.deleteIfExists(stagingDirectory);
+             Cleanup _ = () -> Files.deleteIfExists(staging)) {
             DistfileIntegrity.Fingerprint fingerprint;
-            try (var output = Files.newOutputStream(staging)) {
+            try (var output = openPrivateImportFile(staging)) {
                 fingerprint = DistfileIntegrity.read(source, output, reporter, image.distfiles());
             }
             @Unmodifiable List<RuyiDistfile> matches = image.distfiles().stream()
@@ -277,44 +381,142 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 RuyiDistfile file = matches.get(i);
                 DistfileIntegrity.checkInterrupted();
                 Path target = directory.resolve(file.name());
-                if (Files.exists(target)) {
-                    if (!DistfileIntegrity.verify(target, file)) {
-                        throw new IOException(SdkMessages.get("core.local.cacheConflict", target));
-                    }
+                RuyiDistfileDownloader.relocateStaging(directory, file, image.distfiles());
+                if (hasVerifiedImport(target, file)) {
+                    ImageCacheMarkers.clearArchiveMarker(root, target);
                     continue;
                 }
                 if (i == matches.size() - 1) {
-                    Files.move(staging, target);
+                    ImageCacheMarkers.clearArchiveMarker(root, target);
+                    publishLocalImport(staging, target, file);
                     continue;
                 }
-                Path publication = Files.createTempFile(directory, ".import-", ".tmp");
-                try {
-                    try (var output = Files.newOutputStream(publication)) {
+                try (Cleanup _ = () -> Files.deleteIfExists(publication)) {
+                    try (var output = openPrivateImportFile(publication)) {
                         var copied = DistfileIntegrity.read(staging, output, reporter, List.of(file));
                         if (!DistfileIntegrity.matches(copied, file)) {
                             throw new IOException(SdkMessages.get("core.local.changed", source));
                         }
                     }
                     DistfileIntegrity.checkInterrupted();
-                    Files.move(publication, target);
-                } finally {
-                    Files.deleteIfExists(publication);
+                    ImageCacheMarkers.clearArchiveMarker(root, target);
+                    publishLocalImport(publication, target, file);
                 }
             }
             return matches;
-        } finally {
-            Files.deleteIfExists(staging);
         }
     }
 
+    /// Creates a staged import file with owner-only permissions where POSIX permissions are supported.
+    private static OutputStream openPrivateImportFile(Path path) throws IOException {
+        if (Files.getFileStore(path.getParent()).supportsFileAttributeView(PosixFileAttributeView.class)) {
+            var permissions = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"));
+            return Channels.newOutputStream(FileChannel.open(path,
+                    Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE), permissions));
+        }
+        return Files.newOutputStream(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+    }
+
+    /// Cleans up a staging entry while preserving the primary operation's exception.
+    @NotNullByDefault
+    @FunctionalInterface
+    private interface Cleanup extends AutoCloseable {
+        @Override
+        void close() throws IOException;
+    }
+
+    /// Checks an existing destination without overwriting conflicting content.
+    ///
+    /// @param target destination archive.
+    /// @param file expected archive declaration.
+    /// @return whether a matching file is already cached.
+    /// @throws IOException when the destination exists with conflicting content.
+    private static boolean hasVerifiedImport(Path target, RuyiDistfile file) throws IOException {
+        if (Files.notExists(target, LinkOption.NOFOLLOW_LINKS)) {
+            return false;
+        }
+        if (!DistfileIntegrity.verify(target, file)) {
+            throw new IOException(SdkMessages.get("core.local.cacheConflict", target));
+        }
+        return true;
+    }
+
+    /// Publishes a verified archive without replacing an existing destination.
+    ///
+    /// A hard link exposes the complete file in one operation. When the storage cannot create hard
+    /// links (for example exFAT on Linux), a same-volume move without replacement publishes the
+    /// staged archive instead, so local imports remain available without copying the data and
+    /// without overwriting an existing destination.
+    ///
+    /// @param staged verified archive on the destination filesystem.
+    /// @param target final archive path.
+    /// @param file expected archive declaration.
+    /// @throws IOException when publication is unsupported or a conflicting archive already exists.
+    static void publishLocalImport(Path staged, Path target, RuyiDistfile file) throws IOException {
+        try {
+            Files.createLink(target, staged);
+        } catch (FileAlreadyExistsException occupied) {
+            if (!hasVerifiedImport(target, file)) {
+                throw occupied;
+            }
+        } catch (IOException | UnsupportedOperationException linkFailure) {
+            // Some file systems do not support hard links.
+            // The fallback must publish without replacing a concurrently created archive.
+            if (!publishWithoutReplacing(staged, target, file, linkFailure)) {
+                throw new IOException("Cannot publish local archive without replacing an existing file: " + target,
+                        linkFailure);
+            }
+        }
+    }
+
+    /// Publishes a staged archive without replacing an existing file.
+    ///
+    /// @param staged verified archive on the destination filesystem.
+    /// @param target final archive path.
+    /// @param file expected archive declaration.
+    /// @param failure original hard-link failure to report when the move is unsupported.
+    /// @return whether an archive is available at the destination.
+    /// @throws IOException when the archive cannot be moved or the destination holds other content.
+    static boolean publishWithoutReplacing(Path staged, Path target, RuyiDistfile file, Throwable failure)
+            throws IOException {
+        @Nullable Path parent = target.getParent();
+        if (parent == null
+                || staged.getFileSystem() != FileSystems.getDefault()
+                || target.getFileSystem() != FileSystems.getDefault()) {
+            return false;
+        }
+        try {
+            if (!Files.getFileStore(staged).equals(Files.getFileStore(parent))) {
+                return false;
+            }
+        } catch (IOException storeFailure) {
+            storeFailure.addSuppressed(failure);
+            throw storeFailure;
+        }
+        if (!Files.notExists(target, LinkOption.NOFOLLOW_LINKS)) {
+            return hasVerifiedImport(target, file);
+        }
+        try {
+            CacheTreeRemoval.moveWithoutReplacing(staged, target);
+        } catch (FileAlreadyExistsException occupied) {
+            if (!hasVerifiedImport(target, file)) {
+                throw occupied;
+            }
+        } catch (IOException moveFailure) {
+            moveFailure.addSuppressed(failure);
+            throw moveFailure;
+        }
+        return true;
+    }
+
     /// Downloads and materializes an image while the caller holds its cache lock.
-    private Path downloadAndMaterialize(ImageEntry image, ProgressReporter reporter) throws IOException {
+    private Path downloadAndMaterialize(ImageEntry image, Path root, ProgressReporter reporter) throws IOException {
         if (image.distfiles().isEmpty()) {
             LOGGER.atWarn().log(() -> "Image has no distfiles. atom=" + image.atom());
             throw new IOException(SdkMessages.get("core.download.imageNoDistfiles", image.atom()));
         }
 
-        Path downloadDirectory = downloadDirectory(image);
+        Path downloadDirectory = downloadDirectory(root, image);
         Files.createDirectories(downloadDirectory);
         LOGGER.atInfo().log(() -> "Downloading image. atom="
                 + image.atom()
@@ -333,24 +535,27 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
             downloadedDistfiles.add(downloader.download(
                     distfile,
                     downloadDirectory,
+                    root,
+                    image.distfiles(),
                     ImageProgressAggregator.wrap(reporter, completedBytes, declaredBytes, itemIndex, itemCount)));
             @Nullable Long sizeBytes = distfile.sizeBytes();
             if (sizeBytes != null && sizeBytes > 0L) {
                 completedBytes += sizeBytes;
             }
         }
-        return materialize(image, downloadedDistfiles, reporter);
+        return materialize(image, root, downloadedDistfiles, reporter);
     }
 
     /// Prepares verified distfiles in declaration order while the image cache is locked.
-    private Path materialize(ImageEntry image, List<Path> downloadedDistfiles, ProgressReporter reporter) throws IOException {
-        Path artifactDirectory = directories.cacheDirectory()
+    private Path materialize(
+            ImageEntry image, Path root, List<Path> downloadedDistfiles, ProgressReporter reporter) throws IOException {
+        Path artifactDirectory = root
                 .resolve("artifacts")
                 .resolve(image.repoId())
                 .resolve(image.category())
                 .resolve(image.name())
                 .resolve(image.version());
-        Path result = materializer.materialize(image, List.copyOf(downloadedDistfiles), artifactDirectory, reporter);
+        Path result = materializer.materializeLocked(image, List.copyOf(downloadedDistfiles), artifactDirectory, reporter);
         reporter.report(ProgressEvent.indeterminate("download", SdkMessages.get("core.download.imageComplete", image.atom())));
         LOGGER.atInfo().log(() -> "Image download completed. atom=" + image.atom() + ", artifact=" + result);
         return result;
@@ -401,8 +606,12 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                     manualDownloadRequired = true;
                 }
 
-                Path partial = downloadDirectory.resolve(distfile.name() + ".part");
-                if (Files.isRegularFile(partial)) {
+                @Nullable Path partial = RuyiDistfileDownloader.partialPath(distfile, downloadDirectory, distfiles);
+                if (Files.notExists(partial, LinkOption.NOFOLLOW_LINKS)
+                        && !distfile.fetchRestricted() && DistfileIntegrity.hasSupportedChecksum(distfile)) {
+                    partial = RuyiDistfileDownloader.legacyPartialPath(distfile, downloadDirectory, distfiles);
+                }
+                if (partial != null && Files.isRegularFile(partial, LinkOption.NOFOLLOW_LINKS)) {
                     long partialBytes = Files.size(partial);
                     if (distfileSize == null || partialBytes <= distfileSize) {
                         cachedBytes += partialBytes;
@@ -447,7 +656,16 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     /// @param image image entry.
     /// @return download cache directory.
     private Path downloadDirectory(ImageEntry image) {
-        return directories.cacheDirectory()
+        return downloadDirectory(directories.cacheDirectory(), image);
+    }
+
+    /// Resolves the download cache directory for one image below a given cache root.
+    ///
+    /// @param root cache root, normally the physical root captured for the operation.
+    /// @param image image entry.
+    /// @return download cache directory.
+    private static Path downloadDirectory(Path root, ImageEntry image) {
+        return root
                 .resolve("downloads")
                 .resolve(image.repoId())
                 .resolve(image.category())
@@ -455,12 +673,26 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
                 .resolve(image.version());
     }
 
+    /// Resolves the physical cache root once for a locked operation.
+    ///
+    /// Uses the same physical cache root for locks, downloads, and artifacts.
+    ///
+    /// @return physical cache root.
+    /// @throws IOException when the cache root cannot be created or resolved.
+    private Path physicalCacheRoot() throws IOException {
+        Path configured = directories.cacheDirectory();
+        Files.createDirectories(configured);
+        return configured.toRealPath();
+    }
+
     /// Reads all provisionable image manifests from one repository.
     ///
     /// @param metadata repository metadata.
+    /// @param onlyCombo requested combo name, or null to resolve every combo.
     /// @return immutable image entries.
     /// @throws IOException when package manifests cannot be read.
-    private static @Unmodifiable List<ImageEntry> readRepositoryImages(RuyiRepositoryMetadata metadata) throws IOException {
+    private static @Unmodifiable List<ImageEntry> readRepositoryImages(
+            RuyiRepositoryMetadata metadata, @Nullable String onlyCombo) throws IOException {
         @Nullable Path packageRoot = resolvePackageRoot(metadata.root());
         if (packageRoot == null) {
             LOGGER.atInfo().log(() -> "Repository has no package metadata root. repo=" + metadata.id() + ", root=" + metadata.root());
@@ -483,7 +715,7 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
             }
         }
         @Unmodifiable List<ImageEntry> packageImages = List.copyOf(result);
-        readImageCombos(metadata, deviceIds, packageImages, result);
+        readImageCombos(metadata, deviceIds, packageImages, result, onlyCombo);
         LOGGER.atInfo().log(() -> "Repository image manifests read. repo=" + metadata.id() + ", images=" + result.size());
         return List.copyOf(result);
     }
@@ -622,12 +854,13 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
     /// @param deviceIds known device ids.
     /// @param packageImages package image entries available for combo resolution.
     /// @param result mutable output list.
+    /// @param onlyCombo requested combo name, or null to include every combo.
     /// @throws IOException when combo entities cannot be read.
     private static void readImageCombos(
             RuyiRepositoryMetadata metadata,
             @Unmodifiable List<String> deviceIds,
             @Unmodifiable List<ImageEntry> packageImages,
-            ArrayList<ImageEntry> result) throws IOException {
+            ArrayList<ImageEntry> result, @Nullable String onlyCombo) throws IOException {
         Path comboRoot = metadata.root().resolve("entities").resolve("image-combo");
         if (!Files.isDirectory(comboRoot)) {
             return;
@@ -636,6 +869,9 @@ public final class RuyiImageCatalogService implements ImageCatalogService {
         int beforeCount = result.size();
         try (var files = Files.newDirectoryStream(comboRoot, "*.toml")) {
             for (Path comboPath : files) {
+                if (onlyCombo != null && !onlyCombo.equals(comboName(comboPath))) {
+                    continue;
+                }
                 @Nullable ImageEntry combo = readImageCombo(metadata, comboPath, deviceIds, packageImages);
                 if (combo != null) {
                     result.add(combo);

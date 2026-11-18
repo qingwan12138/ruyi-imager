@@ -5,18 +5,26 @@ package org.glavo.ruyi.imager.core.flash;
 
 import org.glavo.ruyi.imager.core.OperationResult;
 import org.glavo.ruyi.imager.core.ProgressEvent;
+import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.ProgressReporter;
+import org.glavo.ruyi.imager.core.SdkMessages;
 import org.glavo.ruyi.imager.core.StrategySupport;
 import org.glavo.ruyi.imager.core.device.BlockDevice;
 import org.glavo.ruyi.imager.core.device.BlockDeviceService;
 import org.glavo.ruyi.imager.core.fastboot.FastbootDevice;
 import org.glavo.ruyi.imager.core.fastboot.FastbootFlashResult;
 import org.glavo.ruyi.imager.core.fastboot.FastbootService;
+import org.glavo.ruyi.imager.core.fastboot.ProcessFastbootService;
+import org.glavo.ruyi.imager.core.image.CacheLock;
+import org.glavo.ruyi.imager.core.image.ImageAccess;
 import org.glavo.ruyi.imager.core.image.ImageCatalog;
 import org.glavo.ruyi.imager.core.image.ImageCatalogService;
+import org.glavo.ruyi.imager.core.image.ImageCacheService;
 import org.glavo.ruyi.imager.core.image.ImageComponent;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
 import org.glavo.ruyi.imager.core.image.ImageTarget;
+import org.glavo.ruyi.imager.core.image.RuyiImageCatalogService;
+import org.glavo.ruyi.imager.core.repo.RuyiRepositoryStore;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
@@ -24,10 +32,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -36,11 +46,13 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -91,7 +103,7 @@ public final class LocalFlashServiceTest {
         FlashTarget target = sourceKind.equals("fastboot-v1")
                 ? FlashTarget.fastbootDevice(new FastbootDevice("test", "test", "fastboot"))
                 : FlashTarget.blockDevice(target(targetPath, 3, false, false));
-        String expected = "Refusing to write an empty image: " + source;
+        String expected = "Refusing to write an empty image: " + source.toRealPath();
         if (sourceKind.equals("local")) {
             OperationResult result = service.flash(new FlashRequest(null, source, target, verify), NO_PROGRESS);
             assertFalse(result.success());
@@ -119,6 +131,8 @@ public final class LocalFlashServiceTest {
         Path target = temporaryDirectory.resolve("target.raw");
         Files.write(image, new byte[]{1, 2, 3, 4});
         Files.write(target, new byte[16]);
+        Path imageAlias = Files.createDirectory(temporaryDirectory.resolve("nested"))
+                .resolve("..").resolve(image.getFileName());
         CapturingDdImageWriter writer = new CapturingDdImageWriter(true);
 
         OperationResult result = new LocalFlashService(
@@ -126,16 +140,16 @@ public final class LocalFlashServiceTest {
                 new CapturingFastbootService(),
                 BlockDevicePreparer.none(),
                 writer).flash(
-                new FlashRequest(null, image, target(target, 16, false, false), true),
+                new FlashRequest(null, imageAlias, target(target, 16, false, false), true),
                 NO_PROGRESS);
 
         assertTrue(result.success(), result.message());
-        assertEquals(image, writer.writeSource);
+        assertEquals(image.toRealPath(), writer.writeSource);
         assertEquals(target, writer.writeTarget);
         assertEquals("Test Target", writer.writeTargetDisplayName);
         assertEquals(4L, writer.writeTotalBytes);
         assertTrue(writer.writeTargetRemovable);
-        assertEquals(image, writer.verifySource);
+        assertEquals(image.toRealPath(), writer.verifySource);
         assertEquals(target, writer.verifyTarget);
         assertEquals("Test Target", writer.verifyTargetDisplayName);
         assertTrue(writer.verifyTargetRemovable);
@@ -163,7 +177,7 @@ public final class LocalFlashServiceTest {
         assertTrue(result.success(), result.message());
         assertEquals(1, writer.writeCalls.size());
         assertEquals(0, writer.verifyCalls.size());
-        assertEquals(image, writer.writeCalls.getFirst().source());
+        assertEquals(image.toRealPath(), writer.writeCalls.getFirst().source());
         assertEquals(target, writer.writeCalls.getFirst().target());
         assertEquals("Test Target", writer.writeCalls.getFirst().targetDisplayName());
         assertEquals(4L, writer.writeCalls.getFirst().totalBytes());
@@ -221,7 +235,7 @@ public final class LocalFlashServiceTest {
         assertEquals("Written image failed verification.", result.message());
         assertEquals(1, writer.writeCalls.size());
         assertEquals(1, writer.verifyCalls.size());
-        assertEquals(image, writer.verifyCalls.getFirst().source());
+        assertEquals(image.toRealPath(), writer.verifyCalls.getFirst().source());
         assertEquals(target, writer.verifyCalls.getFirst().target());
     }
 
@@ -1514,9 +1528,368 @@ public final class LocalFlashServiceTest {
         }
     }
 
+    /// Refuses to flash a cached artifact while a cleanup holds its cache lock.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void refusesFlashWhileCacheIsCleaned(@TempDir Path temporaryDirectory) throws Exception {
+        Path cache = temporaryDirectory.resolve("cache");
+        Path image = cache.resolve("artifacts/ruyisdk/board-image/meles/1.0.0/root.raw");
+        Files.createDirectories(image.getParent());
+        Files.write(image, new byte[]{1});
+        Path targetPath = temporaryDirectory.resolve("target.raw");
+        Files.write(targetPath, new byte[8]);
+        LocalFlashService service = new LocalFlashService(
+                new EmptyImageCatalogService(),
+                null,
+                new ProcessFastbootService(),
+                BlockDevicePreparer.none(),
+                new AppDirectories(temporaryDirectory.resolve("config"), cache));
+        Path lockPath = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0.lock");
+        Files.createDirectories(lockPath.getParent());
+
+        try (FileChannel channel = FileChannel.open(
+                lockPath,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE);
+             @Nullable FileLock lock = channel.lock()) {
+            OperationResult result = service.flash(
+                    new FlashRequest(null, image, target(targetPath, 8, false, false), false),
+                    NO_PROGRESS);
+
+            assertFalse(result.success());
+            assertEquals(SdkMessages.get("core.local.cacheBusy"), result.message());
+        }
+    }
+
+    /// Discovers the catalog's configured cache when no directories are passed to the flash service.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws IOException when a test file or lock cannot be opened.
+    @Test
+    public void leasesLocalImagesFromCatalogCacheWithDefaultConstructor(@TempDir Path directory) throws IOException {
+        Path cache = directory.resolve("custom-catalog-cache");
+        AppDirectories directories = new AppDirectories(directory.resolve("config"), cache);
+        var catalog = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        var service = new LocalFlashService(catalog);
+        Path source = cache.resolve("artifacts/ruyisdk/board-image/meles/1.0.0/root.raw");
+        Files.createDirectories(source.getParent());
+        Files.write(source, new byte[]{1});
+        Path targetPath = Files.write(directory.resolve("target.raw"), new byte[8]);
+        Path lockPath = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0.lock");
+
+        try (@Nullable CacheLock lock = CacheLock.acquire(lockPath)) {
+            assertNotNull(lock);
+            OperationResult result = service.flash(
+                    new FlashRequest(null, source, target(targetPath, 8, false, true), false),
+                    NO_PROGRESS);
+
+            assertFalse(result.success());
+            assertEquals(SdkMessages.get("core.local.cacheBusy"), result.message());
+        }
+    }
+
+    /// Rejects materializer working files before starting a flash.
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "artifacts/ruyisdk/board-image/meles/.staging-1.0.0-123/root.raw",
+            "downloads/ruyisdk/board-image/meles/1.0.0/.download-partials-0/root.raw.part",
+            "downloads/ruyisdk/board-image/meles/1.0.0/.import-staging-123/source",
+            "imports/ruyisdk/board-image/meles/1.0.0/source"
+    })
+    public void rejectsStagedLocalCacheImage(String cachePath, @TempDir Path directory) throws IOException {
+        Path cache = directory.resolve("cache");
+        AppDirectories directories = new AppDirectories(directory.resolve("config"), cache);
+        var catalog = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        var writer = new CapturingDdImageWriter(true);
+        var service = new LocalFlashService(catalog, new CapturingFastbootService(), BlockDevicePreparer.none(), writer);
+        Path source = cache.resolve(cachePath);
+        Files.createDirectories(source.getParent());
+        Files.write(source, new byte[]{1});
+        Path targetPath = Files.write(directory.resolve("target.raw"), new byte[8]);
+
+        IOException failure = assertThrows(IOException.class, () -> service.flash(
+                new FlashRequest(null, source, target(targetPath, 8, false, true), false), NO_PROGRESS));
+
+        assertEquals(SdkMessages.get("core.flash.localImageStaging", source.toRealPath()), failure.getMessage());
+        assertTrue(writer.writeCalls.isEmpty());
+        assertArrayEquals(new byte[8], Files.readAllBytes(targetPath));
+        assertFalse(Files.exists(cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0.lock")));
+    }
+
+    /// A same-directory alias of the download tree still protects incomplete sources.
+    @Test
+    public void rejectsStagedLocalCacheImageThroughTreeAlias(@TempDir Path directory) throws IOException {
+        Path cache = directory.resolve("cache");
+        AppDirectories directories = new AppDirectories(directory.resolve("config"), cache);
+        var catalog = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        var writer = new CapturingDdImageWriter(true);
+        var service = new LocalFlashService(catalog, new CapturingFastbootService(), BlockDevicePreparer.none(), writer);
+        String relative = "ruyisdk/board-image/meles/1.0.0/.download-partials-0/root.raw.part";
+        Path source = cache.resolve("downloads").resolve(relative);
+        Files.createDirectories(source.getParent());
+        Files.write(source, new byte[]{1});
+        Path alias = cache.resolve("DOWNLOADS").resolve(relative);
+        assumeTrue(Files.exists(alias) && Files.isSameFile(source, alias));
+        @Nullable Path rebased = ImageCacheService.resolveCacheTreeSource(cache.toRealPath(), alias);
+        assertNotNull(rebased);
+        assertEquals(cache.toRealPath().resolve("downloads").resolve(relative).toString(), rebased.toString());
+        Path targetPath = Files.write(directory.resolve("target.raw"), new byte[8]);
+
+        assertThrows(IOException.class, () -> service.flash(
+                new FlashRequest(null, alias, target(targetPath, 8, false, true), false), NO_PROGRESS));
+
+        assertTrue(writer.writeCalls.isEmpty());
+        assertArrayEquals(new byte[8], Files.readAllBytes(targetPath));
+    }
+
+    /// Holds the possible owners of a legacy materializer path before preparing the target.
+    @Test
+    public void protectsLegacyStagedLocalCacheImage(@TempDir Path directory) throws IOException {
+        Path cache = directory.resolve("cache");
+        AppDirectories directories = new AppDirectories(directory.resolve("config"), cache);
+        var catalog = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        var service = new LocalFlashService(catalog);
+        Path source = cache.resolve("artifacts/ruyisdk/board-image/meles/1.0.0.tmp-123/root.raw");
+        Files.createDirectories(source.getParent());
+        Files.write(source, new byte[]{1});
+        Path targetPath = Files.write(directory.resolve("target.raw"), new byte[8]);
+        Path downloadPackage = cache.resolve("downloads/ruyisdk/board-image/meles");
+
+        for (String version : List.of("1.0.0", "1.0.0.tmp-123")) {
+            try (@Nullable CacheLock lock = CacheLock.acquire(downloadPackage.resolve(version + ".lock"))) {
+                assertNotNull(lock);
+                OperationResult result = service.flash(
+                        new FlashRequest(null, source, target(targetPath, 8, false, true), false), NO_PROGRESS);
+
+                assertFalse(result.success());
+                assertEquals(SdkMessages.get("core.local.cacheBusy"), result.message());
+                assertArrayEquals(new byte[8], Files.readAllBytes(targetPath));
+            }
+        }
+    }
+
+    /// Keeps using the selected file when a cache alias is removed during device preparation.
+    ///
+    /// @param directory temporary test directory.
+    /// @throws IOException when a test file cannot be opened.
+    @Test
+    public void flashesResolvedLocalSourceWhenCacheAliasDisappears(@TempDir Path directory) throws IOException {
+        Path cache = directory.resolve("cache");
+        AppDirectories directories = new AppDirectories(directory.resolve("config"), cache);
+        var catalog = new RuyiImageCatalogService(directories, new RuyiRepositoryStore(directories));
+        Path source = Files.write(directory.resolve("external.raw"), new byte[]{1});
+        Path alias = cache.resolve("artifacts/ruyisdk/board-image/meles/1.0.0/root.raw");
+        Files.createDirectories(alias.getParent());
+        try {
+            Files.createSymbolicLink(alias, source);
+        } catch (IOException | SecurityException | UnsupportedOperationException exception) {
+            assumeTrue(false, "Symbolic links are not available: " + exception);
+        }
+        Path targetPath = Files.write(directory.resolve("target.raw"), new byte[8]);
+        var writer = new CapturingDdImageWriter(true);
+        var preparer = new BlockDevicePreparer() {
+            /// Requests preparation so the alias can be removed between source validation and writing.
+            @Override
+            public boolean shouldPrepare(BlockDevice target) {
+                return true;
+            }
+
+            /// Removes the original cache entry while leaving the selected external image intact.
+            @Override
+            public BlockDevice prepare(BlockDevice target, ProgressReporter reporter) throws IOException {
+                Files.delete(alias);
+                return target;
+            }
+        };
+        var service = new LocalFlashService(catalog, new CapturingFastbootService(), preparer, writer);
+
+        OperationResult result = service.flash(
+                new FlashRequest(null, alias, target(targetPath, 8, false, false), true),
+                NO_PROGRESS);
+
+        assertTrue(result.success(), result.message());
+        assertEquals(source.toRealPath(), writer.writeSource);
+        assertEquals(source.toRealPath(), writer.verifySource);
+    }
+
+    /// A delegated download using the default callback stays leased through the device write.
+    @Test
+    public void protectsDefaultCatalogFlash(@TempDir Path directory) throws IOException {
+        Path cache = directory.resolve("cache");
+        Path source = cache.resolve("artifacts/ruyisdk/board-image/meles/1/image.raw");
+        Files.createDirectories(source.getParent());
+        Files.write(source, new byte[]{1, 2, 3});
+        var catalog = new FixedImageCatalogService(source) {
+            @Override
+            public Path cacheDirectory() {
+                return cache;
+            }
+        };
+        var cleanup = new ImageCacheService(new AppDirectories(directory.resolve("config"), cache));
+        var writer = new CapturingDdImageWriter(true);
+        var service = new LocalFlashService(catalog, null, new ProcessFastbootService(), BlockDevicePreparer.none(), writer);
+        Path target = Files.write(directory.resolve("target.raw"), new byte[8]);
+        var image = imageEntry("dd-v1", Map.of("disk", "image.raw"));
+        var attempts = new AtomicInteger();
+        var result = service.flash(new FlashRequest(image, null, target(target, 8, false, false), false), event -> {
+            if ("flash".equals(event.stage())) {
+                assertEquals(1, cleanup.cleanAll().skipped().size());
+                assertTrue(Files.exists(source));
+                attempts.incrementAndGet();
+            }
+        });
+        assertTrue(result.success(), result.message());
+        assertTrue(attempts.get() > 0);
+        assertEquals(1, writer.writeCalls.size());
+        var alternate = new AppDirectories(directory.resolve("config"), directory.resolve("app-cache"));
+        var configured = new LocalFlashService(catalog, null, new CapturingFastbootService(), BlockDevicePreparer.none(), alternate);
+        Path lockPath = cache.resolve("downloads/ruyisdk/board-image/meles/1.lock");
+        try (var lock = CacheLock.acquireVersion(cache, lockPath)) {
+            assertNotNull(lock);
+            var busy = configured.flash(new FlashRequest(image, null, target(target, 8, false, false), false), NO_PROGRESS);
+            assertFalse(busy.success());
+            assertEquals(SdkMessages.get("core.local.cacheBusy"), busy.message());
+        }
+        assertEquals(1, cleanup.cleanAll().removedFiles());
+    }
+
+    /// Uses the catalog's image access callback for a dd flash without an advertised lease.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void leasesCacheVersionForDdFlash(@TempDir Path temporaryDirectory) throws Exception {
+        Path artifact = temporaryDirectory.resolve("artifact").resolve("image.raw");
+        Files.createDirectories(artifact.getParent());
+        Files.write(artifact, new byte[]{1, 2, 3});
+        Path targetPath = temporaryDirectory.resolve("target.raw");
+        Files.write(targetPath, new byte[8]);
+        RecordingCatalogService catalog = new RecordingCatalogService(artifact);
+        ImageEntry image = imageEntry("dd-v1", Map.of("disk", "image.raw"));
+
+        OperationResult result = new LocalFlashService(
+                catalog,
+                null,
+                new ProcessFastbootService(),
+                BlockDevicePreparer.none(),
+                new CapturingDdImageWriter(true)).flash(
+                new FlashRequest(image, null, target(targetPath, 8, false, false), false),
+                NO_PROGRESS);
+
+        assertTrue(result.success(), result.message());
+        assertEquals(1, catalog.leased.get());
+    }
+
+    /// Uses the catalog's image access callback for a fastboot flash without an advertised lease.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void leasesCacheVersionForFastbootFlash(@TempDir Path temporaryDirectory) throws Exception {
+        Path artifactDirectory = temporaryDirectory.resolve("artifact");
+        Files.createDirectories(artifactDirectory);
+        Files.write(artifactDirectory.resolve("boot.ext4"), new byte[]{1, 2, 3});
+        RecordingCatalogService catalog = new RecordingCatalogService(artifactDirectory);
+        ImageEntry image = imageEntry("fastboot-v1", Map.of("boot", "boot.ext4"));
+        FastbootDevice device = new FastbootDevice("test-fastboot", "test-fastboot", "fastboot");
+
+        OperationResult result = new LocalFlashService(catalog, new CapturingFastbootService()).flash(
+                new FlashRequest(image, null, FlashTarget.fastbootDevice(device), false),
+                NO_PROGRESS);
+
+        assertTrue(result.success(), result.message());
+        assertEquals(1, catalog.leased.get());
+    }
+
+    /// Catalog service that records image access without advertising a cache lease.
+    @NotNullByDefault
+    private static final class RecordingCatalogService implements ImageCatalogService {
+        /// Materialized image path.
+        private final Path path;
+
+        /// Number of image access callbacks.
+        private final AtomicInteger leased = new AtomicInteger();
+
+        /// Creates the recording catalog.
+        ///
+        /// @param path materialized image path.
+        private RecordingCatalogService(Path path) {
+            this.path = path;
+        }
+
+        /// Lists no images.
+        ///
+        /// @return empty catalog.
+        @Override
+        public ImageCatalog listImages() {
+            return new ImageCatalog(List.of());
+        }
+
+        /// Returns the fixed image path.
+        ///
+        /// @param image image to download.
+        /// @param reporter progress reporter.
+        /// @return fixed image path.
+        @Override
+        public Path downloadImage(ImageEntry image, ProgressReporter reporter) {
+            return path;
+        }
+
+        /// Records an image access and runs the action.
+        ///
+        /// @param image image to download.
+        /// @param reporter progress reporter.
+        /// @param action action receiving the materialized path.
+        /// @param <T> action result type.
+        /// @return action result.
+        /// @throws IOException when the action fails.
+        @Override
+        public <T> T withDownloadedImage(
+                ImageEntry image,
+                ProgressReporter reporter,
+                ImageAccess<T> action) throws IOException {
+            leased.incrementAndGet();
+            return action.run(path);
+        }
+    }
+
+    /// Locks local images that live inside the download tree.
+    ///
+    /// @param temporaryDirectory temporary test directory.
+    /// @throws Exception when fixture files cannot be written.
+    @Test
+    public void locksLocalImagesInsideDownloadTree(@TempDir Path temporaryDirectory) throws Exception {
+        Path cache = temporaryDirectory.resolve("cache");
+        Path image = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0/image.raw");
+        Files.createDirectories(image.getParent());
+        Files.write(image, new byte[]{1});
+        Path targetPath = temporaryDirectory.resolve("target.raw");
+        Files.write(targetPath, new byte[8]);
+        LocalFlashService service = new LocalFlashService(
+                new EmptyImageCatalogService(),
+                null,
+                new ProcessFastbootService(),
+                BlockDevicePreparer.none(),
+                new AppDirectories(temporaryDirectory.resolve("config"), cache));
+        Path lockPath = cache.resolve("downloads/ruyisdk/board-image/meles/1.0.0.lock");
+
+        try (@Nullable CacheLock lock = CacheLock.acquire(lockPath)) {
+            assertNotNull(lock);
+            OperationResult result = service.flash(
+                    new FlashRequest(null, image, target(targetPath, 8, false, false), false),
+                    NO_PROGRESS);
+
+            assertFalse(result.success());
+            assertEquals(SdkMessages.get("core.local.cacheBusy"), result.message());
+            assertTrue(Files.exists(image));
+        }
+    }
+
     /// Image catalog service returning a fixed materialized path.
     @NotNullByDefault
-    private static final class FixedImageCatalogService implements ImageCatalogService {
+    private static class FixedImageCatalogService implements ImageCatalogService {
         /// Materialized image path.
         private final Path path;
 

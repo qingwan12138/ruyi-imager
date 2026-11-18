@@ -4,6 +4,7 @@
 package org.glavo.ruyi.imager.core.flash;
 
 import org.glavo.ruyi.imager.core.OperationResult;
+import org.glavo.ruyi.imager.core.AppDirectories;
 import org.glavo.ruyi.imager.core.ProgressEvent;
 import org.glavo.ruyi.imager.core.ProgressUnit;
 import org.glavo.ruyi.imager.core.ProgressReporter;
@@ -14,9 +15,13 @@ import org.glavo.ruyi.imager.core.fastboot.FastbootDevice;
 import org.glavo.ruyi.imager.core.fastboot.FastbootFlashResult;
 import org.glavo.ruyi.imager.core.fastboot.FastbootService;
 import org.glavo.ruyi.imager.core.fastboot.ProcessFastbootService;
+import org.glavo.ruyi.imager.core.image.ImageAccess;
 import org.glavo.ruyi.imager.core.image.ImageCatalogService;
 import org.glavo.ruyi.imager.core.image.ImageComponent;
+import org.glavo.ruyi.imager.core.image.ImageCacheService;
+import org.glavo.ruyi.imager.core.image.CacheLock;
 import org.glavo.ruyi.imager.core.image.ImageEntry;
+import org.glavo.ruyi.imager.core.image.RuyiImageMaterializer;
 import org.glavo.ruyi.imager.core.SdkMessages;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -24,6 +29,7 @@ import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -56,6 +62,9 @@ public final class LocalFlashService implements FlashService {
 
     /// dd-style raw image writer backend.
     private final DdImageWriter ddImageWriter;
+
+    /// Explicit cache root, or null to discover the catalog's root when flashing a local file.
+    private final @Nullable Path cacheDirectory;
 
     /// Creates the local flash service.
     ///
@@ -137,11 +146,46 @@ public final class LocalFlashService implements FlashService {
             FastbootService fastboot,
             BlockDevicePreparer blockDevicePreparer,
             DdImageWriter ddImageWriter) {
+        this(images, devices, fastboot, blockDevicePreparer, ddImageWriter, null);
+    }
+
+    /// Creates the local flash service with cache-aware artifact leases.
+    ///
+    /// @param images image catalog service.
+    /// @param devices block-device service used to re-resolve targets.
+    /// @param fastboot fastboot backend.
+    /// @param blockDevicePreparer block-device preparation hook.
+    /// @param directories application directories used to lease cached artifacts.
+    public LocalFlashService(
+            ImageCatalogService images,
+            @Nullable BlockDeviceService devices,
+            FastbootService fastboot,
+            BlockDevicePreparer blockDevicePreparer,
+            AppDirectories directories) {
+        this(images, devices, fastboot, blockDevicePreparer, DdImageWriter.process(), directories);
+    }
+
+    /// Creates the local flash service.
+    ///
+    /// @param images image catalog service.
+    /// @param devices block-device service used to re-resolve targets.
+    /// @param fastboot fastboot backend.
+    /// @param blockDevicePreparer block-device preparation hook.
+    /// @param ddImageWriter dd-style raw image writer backend.
+    /// @param directories application directories used to lease cached artifacts, or null.
+    private LocalFlashService(
+            ImageCatalogService images,
+            @Nullable BlockDeviceService devices,
+            FastbootService fastboot,
+            BlockDevicePreparer blockDevicePreparer,
+            DdImageWriter ddImageWriter,
+            @Nullable AppDirectories directories) {
         this.images = images;
         this.devices = devices;
         this.fastboot = fastboot;
         this.blockDevicePreparer = blockDevicePreparer;
         this.ddImageWriter = ddImageWriter;
+        this.cacheDirectory = directories == null ? null : directories.cacheDirectory();
     }
 
     /// Executes an image flash request.
@@ -160,7 +204,18 @@ public final class LocalFlashService implements FlashService {
                 + request.verify());
         @Nullable Path localImage = request.localImage();
         if (localImage != null) {
-            return flashBlockImage(localImage, request.target(), request.verify(), reporter);
+            Path source;
+            try {
+                source = localImage.toRealPath();
+            } catch (IOException _) {
+                return OperationResult.failure(SdkMessages.get("core.flash.localImageMissing", localImage));
+            }
+            try (@Nullable CacheSourceLease lease = acquireCacheLease(source)) {
+                return flashBlockImage(source, request.target(), request.verify(), reporter);
+            } catch (CacheBusyException _) {
+                LOGGER.warn("Cached image is being cleaned. source=" + source);
+                return OperationResult.failure(SdkMessages.get("core.local.cacheBusy"));
+            }
         }
 
         @Nullable ImageEntry image = request.image();
@@ -177,12 +232,13 @@ public final class LocalFlashService implements FlashService {
 
         if (ProvisionStrategies.isDD(image.strategy())) {
             LOGGER.atInfo().log(() -> "Dispatching dd-v1 flash. atom=" + image.atom());
-            Path materialized = images.downloadImage(image, reporter);
-            @Unmodifiable Map<String, Path> partitions = resolvePartitionPaths(image, materialized);
-            if (partitions.size() == 1 && request.target().blockDevice() != null) {
-                return flashBlockImage(partitions.values().iterator().next(), request.target(), request.verify(), reporter);
-            }
-            return flashBlockPartitions(partitions, request.target(), request.verify(), reporter);
+            return withFlashSource(image, reporter, materialized -> {
+                @Unmodifiable Map<String, Path> partitions = resolvePartitionPaths(image, materialized);
+                if (partitions.size() == 1 && request.target().blockDevice() != null) {
+                    return flashBlockImage(partitions.values().iterator().next(), request.target(), request.verify(), reporter);
+                }
+                return flashBlockPartitions(partitions, request.target(), request.verify(), reporter);
+            });
         }
 
         if (ProvisionStrategies.isFastboot(image.strategy())) {
@@ -192,6 +248,22 @@ public final class LocalFlashService implements FlashService {
 
         LOGGER.atWarn().log(() -> "Unsupported flash strategy. atom=" + image.atom() + ", strategy=" + image.strategy());
         return OperationResult.failure(SdkMessages.get("core.flash.unsupportedStrategy", image.strategy()));
+    }
+
+    /// Keeps a managed source available across all partition writes for catalogs that delegate downloads.
+    private OperationResult withFlashSource(ImageEntry image, ProgressReporter reporter,
+            ImageAccess<OperationResult> action) throws IOException {
+        if (images.supportsCacheLease() || (cacheDirectory == null && images.cacheDirectory() == null)) {
+            return images.withDownloadedImage(image, reporter, action);
+        }
+        return images.withDownloadedImage(image, reporter, materialized -> {
+            Path source = materialized.toRealPath();
+            try (@Nullable CacheSourceLease lease = acquireCacheLease(source)) {
+                return action.run(source);
+            } catch (CacheBusyException _) {
+                return OperationResult.failure(SdkMessages.get("core.local.cacheBusy"));
+            }
+        });
     }
 
     /// Writes one raw image to a block device target.
@@ -629,7 +701,25 @@ public final class LocalFlashService implements FlashService {
             return OperationResult.failure(SdkMessages.get("core.fastboot.targetRequired"));
         }
 
-        Path materialized = images.downloadImage(image, reporter);
+        return withFlashSource(
+                image,
+                reporter,
+                materialized -> flashFastbootArtifacts(image, materialized, fastbootDevice, reporter));
+    }
+
+    /// Flashes complete fastboot artifacts inside the catalog's image access callback.
+    ///
+    /// @param image image metadata.
+    /// @param materialized materialized artifact directory.
+    /// @param fastbootDevice connected fastboot device.
+    /// @param reporter progress reporter.
+    /// @return operation result.
+    /// @throws IOException when fastboot execution fails.
+    private OperationResult flashFastbootArtifacts(
+            ImageEntry image,
+            Path materialized,
+            FastbootDevice fastbootDevice,
+            ProgressReporter reporter) throws IOException {
         @Unmodifiable List<ImageComponent> components = image.components();
         if (components.size() <= 1) {
             @Unmodifiable Map<String, Path> partitions = resolvePartitionPaths(image, materialized);
@@ -667,6 +757,143 @@ public final class LocalFlashService implements FlashService {
             fastbootDevice = result.device();
         }
         return OperationResult.success(SdkMessages.get("core.fastboot.success"));
+    }
+
+    /// Acquires the cache lock that owns a materialized artifact.
+    ///
+    /// @param source physical path to the local image.
+    /// @return held lease, or null when the artifact is not inside the application cache.
+    /// @throws IOException when the lock file cannot be opened.
+    /// @throws CacheBusyException when another process holds the cache lock.
+    private @Nullable CacheSourceLease acquireCacheLease(Path source) throws IOException, CacheBusyException {
+        if (cacheDirectory != null) {
+            @Nullable CacheSourceLease lease = acquireCacheLease(source, cacheDirectory);
+            if (lease != null) {
+                return lease;
+            }
+        }
+        @Nullable Path catalogRoot = images.cacheDirectory();
+        return catalogRoot == null || catalogRoot.equals(cacheDirectory) ? null : acquireCacheLease(source, catalogRoot);
+    }
+
+    /// Tries one configured cache root for the materialized source.
+    private @Nullable CacheSourceLease acquireCacheLease(Path source, Path root) throws IOException, CacheBusyException {
+        Path physicalRoot;
+        try {
+            physicalRoot = root.toRealPath();
+        } catch (IOException _) {
+            return null;
+        }
+        @Nullable Path cacheSource = ImageCacheService.resolveCacheTreeSource(physicalRoot, source);
+        if (cacheSource == null) {
+            return null;
+        }
+        @Nullable Path lockPath = cacheLockPath(cacheSource, physicalRoot);
+        if (lockPath == null) {
+            return null;
+        }
+        @Nullable Path olderLock = null;
+        if (cacheSource.startsWith(physicalRoot.resolve("artifacts"))) {
+            String fileName = lockPath.getFileName().toString();
+            int marker = Math.max(fileName.lastIndexOf(".tmp-"), fileName.lastIndexOf(".old-"));
+            if (marker > 0) {
+                String olderVersion = fileName.substring(0, marker);
+                if (!ImageCacheService.isSafeComponent(physicalRoot, olderVersion)) {
+                    throw new IOException(SdkMessages.get("core.flash.localImageStaging", source));
+                }
+                olderLock = lockPath.resolveSibling(olderVersion + ".lock");
+            }
+        }
+        Path first = olderLock == null || lockPath.compareTo(olderLock) < 0 ? lockPath : olderLock;
+        CacheLock firstLease = acquireRequiredLease(physicalRoot, first);
+        try {
+            if (olderLock == null) {
+                if (ImageCacheService.isMarkedDownloadPartial(root, physicalRoot, cacheSource, images)) {
+                    throw new IOException(SdkMessages.get("core.flash.localImageStaging", source));
+                }
+                return new CacheSourceLease(firstLease, null);
+            }
+            Path second = first.equals(lockPath) ? olderLock : lockPath;
+            return new CacheSourceLease(firstLease, acquireRequiredLease(physicalRoot, second));
+        } catch (IOException | CacheBusyException | RuntimeException | Error failure) {
+            try {
+                firstLease.close();
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
+    }
+
+    /// Acquires one required lease or reports the cache version as busy.
+    private static CacheLock acquireRequiredLease(Path root, Path lockPath) throws IOException, CacheBusyException {
+        @Nullable CacheLock lease = CacheLock.acquireVersion(root, lockPath);
+        if (lease == null) {
+            throw new CacheBusyException();
+        }
+        return lease;
+    }
+
+    /// Holds the possible owners of the source path until flashing finishes.
+    ///
+    /// @param first first acquired version lease.
+    /// @param second second acquired lease for an ambiguous legacy artifact directory.
+    @NotNullByDefault
+    private record CacheSourceLease(CacheLock first, @Nullable CacheLock second) implements AutoCloseable {
+        @Override
+        public void close() throws IOException {
+            try (CacheLock _ = first; @Nullable CacheLock _ = second) {
+                // Resources close in reverse acquisition order.
+            }
+        }
+    }
+
+    /// Returns the owning version lock for a cached source and rejects cache working files.
+    ///
+    /// @param source physical path to the local image.
+    /// @param realCache physical cache root.
+    /// @return lock path, or null when the artifact is not a cached image version.
+    private static @Nullable Path cacheLockPath(Path source, Path realCache) throws IOException {
+        Path downloadRoot = realCache.resolve("downloads");
+        Path artifactRoot = realCache.resolve("artifacts");
+        Path importRoot = realCache.resolve("imports");
+        Path relative;
+        if (source.startsWith(downloadRoot)) {
+            relative = downloadRoot.relativize(source);
+        } else if (source.startsWith(artifactRoot)) {
+            relative = artifactRoot.relativize(source);
+        } else if (source.startsWith(importRoot)) {
+            throw new IOException(SdkMessages.get("core.flash.localImageStaging", source));
+        } else {
+            return null;
+        }
+        if (relative.getNameCount() < 4) {
+            return null;
+        }
+        String repoId = relative.getName(0).toString();
+        String category = relative.getName(1).toString();
+        String name = relative.getName(2).toString();
+        String version = relative.getName(3).toString();
+        if ((source.startsWith(artifactRoot) && RuyiImageMaterializer.isWorkingArtifactDirectory(version))
+                || (source.startsWith(downloadRoot) && relative.getNameCount() > 5
+                && ImageCacheService.isDownloadStagingDirectory(relative.getName(4)))) {
+            throw new IOException(SdkMessages.get("core.flash.localImageStaging", source));
+        }
+        if (!ImageCacheService.isSafeComponent(realCache, repoId) || !ImageCacheService.isSafeComponent(realCache, category)
+                || !ImageCacheService.isSafeComponent(realCache, name) || !ImageCacheService.isSafeComponent(realCache, version)) {
+            return null;
+        }
+        return downloadRoot.resolve(repoId)
+                .resolve(category)
+                .resolve(name)
+                .resolve(version + ".lock");
+    }
+
+    /// Signals that a cached artifact is locked by a cleanup operation.
+    @NotNullByDefault
+    private static final class CacheBusyException extends Exception {
+        /// Serialization identifier.
+        private static final long serialVersionUID = 1L;
     }
 
     /// Holds one component's resolved partition paths for ordered execution after preflight.
